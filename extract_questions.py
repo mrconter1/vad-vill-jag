@@ -30,6 +30,46 @@ OUTPUT     = "questions.json"
 BET_CACHE  = "bet-cache.json"
 BASE_URL   = "https://data.riksdagen.se/dataset"
 
+COMMITTEE_CATEGORIES = {
+    "AU":  {"sv": "Arbetsmarknad",             "en": "Labor Market"},
+    "CU":  {"sv": "Civilrätt",                 "en": "Civil Law"},
+    "FiU": {"sv": "Ekonomi och finans",        "en": "Economy & Finance"},
+    "FöU": {"sv": "Försvar",                   "en": "Defense"},
+    "JuU": {"sv": "Rättsväsende",              "en": "Justice & Criminal Law"},
+    "KU":  {"sv": "Konstitution och demokrati", "en": "Constitution & Democracy"},
+    "KrU": {"sv": "Kultur",                    "en": "Culture"},
+    "MJU": {"sv": "Miljö och jordbruk",        "en": "Environment & Agriculture"},
+    "NU":  {"sv": "Näringsliv",                "en": "Business & Industry"},
+    "SkU": {"sv": "Skatter",                   "en": "Taxation"},
+    "SfU": {"sv": "Socialförsäkring och migration", "en": "Social Insurance & Migration"},
+    "SoU": {"sv": "Hälsa och sjukvård",        "en": "Health & Social Affairs"},
+    "TU":  {"sv": "Transport och infrastruktur", "en": "Transport & Infrastructure"},
+    "UbU": {"sv": "Utbildning",                "en": "Education"},
+    "UU":  {"sv": "Utrikespolitik",            "en": "Foreign Affairs"},
+}
+
+def _extract_committee(beteckning):
+    m = re.match(r"^([A-Za-zÖöÅåÄä]+)", beteckning)
+    return m.group(1) if m else ""
+
+def _get_category(beteckning):
+    code = _extract_committee(beteckning)
+    cat = COMMITTEE_CATEGORIES.get(code, {"sv": code, "en": code})
+    return code, cat["sv"], cat["en"]
+
+def _detect_punkt_type(forslag_text):
+    """Detect if a punkt is about a government proposition or opposition motions."""
+    lower = forslag_text.lower()
+    has_proposition = "propositionen" in lower or "proposition" in lower
+    has_motion = "motion" in lower
+    if has_proposition and not has_motion:
+        return "proposition"
+    if has_motion and not has_proposition:
+        return "motion"
+    if has_proposition and has_motion:
+        return "proposition_and_motion"
+    return "other"
+
 PRICE_IN   = 5.0  / 1_000_000
 PRICE_OUT  = 25.0 / 1_000_000
 USD_TO_SEK = 10.5
@@ -278,7 +318,11 @@ def extract_questions_for_bet(titel, punkter_data):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     sections = []
     for punkt, pd in sorted(punkter_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
-        sections.append(f"PUNKT {punkt}: {pd['rubrik']}\n{pd['forslag'][:600]}")
+        ptype = _detect_punkt_type(pd.get("forslag", ""))
+        type_hint = ""
+        if ptype in ("proposition", "proposition_and_motion"):
+            type_hint = " [This involves a government proposition — frame the question around what the government proposes to do]"
+        sections.append(f"PUNKT {punkt}: {pd['rubrik']}{type_hint}\n{pd['forslag'][:600]}")
     prompt = (
         f"Betänkande: {titel}\n\n"
         + "\n\n---\n\n".join(sections)
@@ -287,6 +331,9 @@ def extract_questions_for_bet(titel, punkter_data):
         "clear and specific enough for an expert to find it accurate, but immediately "
         "understandable to anyone without political background. Focus on the real-world "
         "effect — what would actually change for people or society. "
+        "When a punkt involves a government proposition, frame the question around the "
+        "government's proposed change (e.g. 'Should the government be allowed to...'). "
+        "When it involves opposition motions, frame it around the proposed alternative. "
         "Use neutral, formal language — no slang, no colloquialisms. "
         "Avoid procedural jargon like 'motion', 'betänkande', 'utskott', 'yrkande'. "
         "No em dashes. One sentence per punkt. Phrased so the person can answer yes or no.\n\n"
@@ -383,20 +430,26 @@ for bet, punkt_list in by_bet.items():
         }
 
         dok_id = bet_info.get("dok_id", "")
+        committee_code, cat_sv, cat_en = _get_category(bet)
+        punkt_type = _detect_punkt_type(pd.get("forslag", ""))
         results.append({
-            "id":           item_id,
-            "datum":        datum,
-            "rm":           rm,
-            "beteckning":   bet,
-            "titel":        titel,
-            "punkt":        punkt,
-            "rubrik":       pd.get("rubrik", f"Punkt {punkt}"),
-            "question_sv":  questions_map.get(punkt, {}).get("sv", ""),
-            "question_en":  questions_map.get(punkt, {}).get("en", ""),
-            "outcome":      outcome,
-            "ja_total":     ja_total,
-            "nej_total":    nej_total,
-            "url":          f"https://data.riksdagen.se/dokument/{dok_id}" if dok_id else "",
+            "id":            item_id,
+            "datum":         datum,
+            "rm":            rm,
+            "beteckning":    bet,
+            "titel":         titel,
+            "punkt":         punkt,
+            "rubrik":        pd.get("rubrik", f"Punkt {punkt}"),
+            "type":          punkt_type,
+            "category_code": committee_code,
+            "category_sv":   cat_sv,
+            "category_en":   cat_en,
+            "question_sv":   questions_map.get(punkt, {}).get("sv", ""),
+            "question_en":   questions_map.get(punkt, {}).get("en", ""),
+            "outcome":       outcome,
+            "ja_total":      ja_total,
+            "nej_total":     nej_total,
+            "url":           f"https://data.riksdagen.se/dokument/{dok_id}" if dok_id else "",
             "party_stances": party_stances,
         })
         existing_ids.add(item_id)
