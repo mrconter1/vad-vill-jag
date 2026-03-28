@@ -7,6 +7,7 @@ import urllib.request
 import subprocess
 import sys
 from collections import defaultdict
+from datetime import datetime
 import anthropic
 
 # ── env ───────────────────────────────────────────────────────────────────────
@@ -334,7 +335,7 @@ def extract_questions_for_bet(titel, punkter_data):
         "When a punkt involves a government proposition, frame the question around the "
         "government's proposed change (e.g. 'Should the government be allowed to...'). "
         "When it involves opposition motions, frame it around the proposed alternative. "
-        "Use neutral, formal language — no slang, no colloquialisms. "
+        "Use neutral, formal language — no slang, no colloquialisms (e.g. never use 'schyssta', 'kolla', 'fixa'). "
         "Avoid procedural jargon like 'motion', 'betänkande', 'utskott', 'yrkande'. "
         "No em dashes. One sentence per punkt. Phrased so the person can answer yes or no.\n\n"
         "Reply ONLY with JSON where each key is the punkt number and the value has "
@@ -347,7 +348,9 @@ def extract_questions_for_bet(titel, punkter_data):
     _total_in  += in_tok
     _total_out += out_tok
     cost_sek = (in_tok * PRICE_IN + out_tok * PRICE_OUT) * USD_TO_SEK
-    print(f"    tokens: {in_tok} in / {out_tok} out  |  {cost_sek:.3f} kr", flush=True)
+    running_cost = (_total_in * PRICE_IN + _total_out * PRICE_OUT) * USD_TO_SEK
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"    [{ts}] tokens: {in_tok} in / {out_tok} out  |  {cost_sek:.3f} kr  |  running: {running_cost:.2f} kr", flush=True)
     raw = re.sub(r"^```[a-z]*\n?", "", msg.content[0].text.strip())
     raw = re.sub(r"\n?```$", "", raw)
     return json.loads(raw)
@@ -377,6 +380,8 @@ else:
     results = []
     existing_ids = set()
 
+_points_done = len(existing_ids)
+
 for bet, punkt_list in by_bet.items():
     rm = punkt_list[0][2]
     bet_info        = bet_cache.get(f"{rm}|{bet}", {})
@@ -390,10 +395,10 @@ for bet, punkt_list in by_bet.items():
     }
 
     if not relevant:
-        print(f"  {bet}: no forslag text, skipping Claude call")
+        print(f"  [{_points_done}/{N_PUNKTER}] {bet}: no forslag text, skipping Claude call")
         questions_map = {}
     else:
-        print(f"  {bet} [{rm}] ({titel[:45]}): calling Claude for {len(relevant)} punkter...", flush=True)
+        print(f"  [{_points_done}/{N_PUNKTER}] {bet} [{rm}] ({titel[:45]}): calling Claude for {len(relevant)} punkter...", flush=True)
         try:
             questions_map = extract_questions_for_bet(titel, relevant)
         except Exception as e:
@@ -453,6 +458,7 @@ for bet, punkt_list in by_bet.items():
             "party_stances": party_stances,
         })
         existing_ids.add(item_id)
+        _points_done += 1
 
     with open(OUTPUT, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
