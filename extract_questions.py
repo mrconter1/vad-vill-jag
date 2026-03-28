@@ -372,13 +372,15 @@ selected = all_punkter[:N_PUNKTER]
 
 by_bet = defaultdict(list)
 for bet, punkt, datum, rm in selected:
-    by_bet[bet].append((punkt, datum, rm))
+    by_bet[(rm, bet)].append((punkt, datum, rm))
 
 if os.path.exists(OUTPUT):
     with open(OUTPUT, encoding="utf-8") as f:
-        results = json.load(f)
+        all_results = json.load(f)
+    results = [r for r in all_results if r.get("question_sv") and r.get("question_en")]
     existing_ids = {r["id"] for r in results}
-    print(f"Loaded {len(results)} existing questions from {OUTPUT}")
+    dropped = len(all_results) - len(results)
+    print(f"Loaded {len(results)} existing questions from {OUTPUT}" + (f" ({dropped} empty entries queued for retry)" if dropped else ""))
 else:
     results = []
     existing_ids = set()
@@ -466,7 +468,7 @@ def process_bet(bet, punkt_list):
 
 print(f"Running with {WORKERS} parallel workers\n")
 with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-    futures = {executor.submit(process_bet, bet, pl): bet for bet, pl in by_bet.items()}
+    futures = {executor.submit(process_bet, bet, pl): bet for (rm, bet), pl in by_bet.items()}
     for future in as_completed(futures):
         new_items = future.result()
         with _save_lock:
