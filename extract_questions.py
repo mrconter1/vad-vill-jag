@@ -250,7 +250,7 @@ def build_index(votes):
         if not bet:
             continue
         bet_data[bet][v["punkt"]][v["votering_id"]].append(v)
-        d = v.get("datum", "")
+        d = v.get("datum") or ""
         if bet not in bet_dates or d > bet_dates[bet]:
             bet_dates[bet] = d
         bet_rm[bet] = v.get("rm", "")
