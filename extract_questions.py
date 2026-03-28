@@ -7,7 +7,9 @@ import urllib.request
 import subprocess
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+import threading
 import anthropic
 
 # ── env ───────────────────────────────────────────────────────────────────────
@@ -27,6 +29,7 @@ _load_env()
 PARTIES    = ["S", "SD", "M", "V", "C", "KD", "MP", "L"]
 MODEL      = "claude-opus-4-6"
 N_PUNKTER  = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+WORKERS    = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 OUTPUT     = "questions.json"
 BET_CACHE  = "bet-cache.json"
 BASE_URL   = "https://data.riksdagen.se/dataset"
@@ -381,9 +384,10 @@ else:
     existing_ids = set()
 
 _points_done = len(existing_ids)
+_save_lock   = threading.Lock()
 
-for bet, punkt_list in by_bet.items():
-    rm = punkt_list[0][2]
+def process_bet(bet, punkt_list):
+    rm              = punkt_list[0][2]
     bet_info        = bet_cache.get(f"{rm}|{bet}", {})
     titel           = bet_info.get("titel", bet)
     all_bet_punkter = bet_info.get("punkter", {})
@@ -395,16 +399,17 @@ for bet, punkt_list in by_bet.items():
     }
 
     if not relevant:
-        print(f"  [{_points_done}/{N_PUNKTER}] {bet}: no forslag text, skipping Claude call")
+        print(f"  {bet}: no forslag text, skipping", flush=True)
         questions_map = {}
     else:
-        print(f"  [{_points_done}/{N_PUNKTER}] {bet} [{rm}] ({titel[:45]}): calling Claude for {len(relevant)} punkter...", flush=True)
+        print(f"  {bet} [{rm}] ({titel[:45]}): calling Claude for {len(relevant)} punkter...", flush=True)
         try:
             questions_map = extract_questions_for_bet(titel, relevant)
         except Exception as e:
-            print(f"    Claude error: {e}")
+            print(f"    Claude error on {bet}: {e}", flush=True)
             questions_map = {}
 
+    new_items = []
     for punkt, datum, rm in punkt_list:
         item_id = f"{rm}_{bet}_{punkt}"
         if item_id in existing_ids:
@@ -415,11 +420,11 @@ for bet, punkt_list in by_bet.items():
             for v in mp_votes:
                 tally[v.get("parti", "-")][v.get("rost", "?")] += 1
 
-        ja_total      = sum(tally[p].get("Ja", 0) for p in tally)
-        nej_total     = sum(tally[p].get("Nej", 0) for p in tally)
-        committee_won = ja_total > nej_total
-        pd            = all_bet_punkter.get(punkt, {})
-        forslag_text  = pd.get("forslag", "").lower()
+        ja_total           = sum(tally[p].get("Ja", 0) for p in tally)
+        nej_total          = sum(tally[p].get("Nej", 0) for p in tally)
+        committee_won      = ja_total > nej_total
+        pd                 = all_bet_punkter.get(punkt, {})
+        forslag_text       = pd.get("forslag", "").lower()
         committee_approves = "bifaller" in forslag_text
 
         if not forslag_text:
@@ -437,7 +442,7 @@ for bet, punkt_list in by_bet.items():
         dok_id = bet_info.get("dok_id", "")
         committee_code, cat_sv, cat_en = _get_category(bet)
         punkt_type = _detect_punkt_type(pd.get("forslag", ""))
-        results.append({
+        new_items.append({
             "id":            item_id,
             "datum":         datum,
             "rm":            rm,
@@ -457,12 +462,32 @@ for bet, punkt_list in by_bet.items():
             "url":           f"https://data.riksdagen.se/dokument/{dok_id}" if dok_id else "",
             "party_stances": party_stances,
         })
-        existing_ids.add(item_id)
-        _points_done += 1
+    return new_items
 
-    with open(OUTPUT, "w", encoding="utf-8") as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
+print(f"Running with {WORKERS} parallel workers\n")
+with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+    futures = {executor.submit(process_bet, bet, pl): bet for bet, pl in by_bet.items()}
+    for future in as_completed(futures):
+        new_items = future.result()
+        with _save_lock:
+            for item in new_items:
+                if item["id"] not in existing_ids:
+                    results.append(item)
+                    existing_ids.add(item["id"])
+                    _points_done += 1
+            print(f"  [{_points_done}/{N_PUNKTER}] saved {len(new_items)} from {futures[future]}", flush=True)
+            with open(OUTPUT, "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
 
 total_cost_sek = (_total_in * PRICE_IN + _total_out * PRICE_OUT) * USD_TO_SEK
 print(f"\nDone. {len(results)} questions written to {OUTPUT}")
 print(f"Total tokens: {_total_in} in / {_total_out} out  |  total cost: {total_cost_sek:.2f} kr")
+
+empty = [r for r in results if not r.get("question_sv") or not r.get("question_en")]
+if empty:
+    print(f"\nWARNING: {len(empty)} questions have empty question text:")
+    for r in empty:
+        print(f"  {r['id']}")
+    print(f"\nRe-run with --retry-empty to regenerate them.")
+else:
+    print(f"All {len(results)} questions have question text.")
