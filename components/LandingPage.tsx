@@ -100,6 +100,14 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
         <div className="border-l-2 border-gold pl-4 space-y-3">
           <p className="text-navy/70 text-sm leading-relaxed">{t.how(count, roundedTotal)}</p>
           <p className="text-navy/70 text-sm leading-relaxed">{t.fair}</p>
+          <a
+            href="https://github.com/mrconter1/vad-vill-jag"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[11px] text-navy/35 hover:text-navy/60 underline underline-offset-2 transition-colors inline-block"
+          >
+            github.com/mrconter1/vad-vill-jag
+          </a>
         </div>
       </div>
 
