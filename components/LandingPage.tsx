@@ -25,6 +25,7 @@ const T = {
     fairTitle: 'Varför är det rättvist?',
     fair: 'Alla frågor är hämtade direkt ur riksdagens öppna data utan egna tolkningar. Urvalet är slumpmässigt och baseras enbart på verkliga voteringar.',
     countLabel: 'Antal frågor',
+    custom: 'Eget',
     start: 'Starta quiz',
     resumeNote: (n: number, total: number) => `${n} av ${total} besvarade`,
     resume: 'Fortsätt',
@@ -39,6 +40,7 @@ const T = {
     fairTitle: 'Why is it fair?',
     fair: 'All questions are sourced directly from Sweden\'s open parliamentary data with no editorial interpretation. The selection is random and based solely on real recorded votes.',
     countLabel: 'Number of questions',
+    custom: 'Custom',
     start: 'Start quiz',
     resumeNote: (n: number, total: number) => `${n} of ${total} answered`,
     resume: 'Continue',
@@ -106,7 +108,7 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
             rel="noopener noreferrer"
             className="text-[11px] text-navy/35 hover:text-navy/60 underline underline-offset-2 transition-colors inline-block"
           >
-            github.com/mrconter1/vad-vill-jag
+            Källkod
           </a>
         </div>
       </div>
@@ -128,6 +130,22 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
               {n}
             </button>
           ))}
+          <input
+            type="number"
+            min={1}
+            max={500}
+            placeholder={t.custom}
+            value={COUNT_OPTIONS.includes(count) ? '' : count}
+            onChange={(e) => {
+              const v = Math.min(500, Math.max(1, parseInt(e.target.value) || 1))
+              setCount(v)
+            }}
+            className={`w-20 py-4 text-lg font-bold border-2 text-center transition-all bg-transparent outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${
+              !COUNT_OPTIONS.includes(count)
+                ? 'bg-navy text-cream border-navy'
+                : 'text-navy border-navy/20 hover:border-navy/60'
+            }`}
+          />
         </div>
       </div>
 
