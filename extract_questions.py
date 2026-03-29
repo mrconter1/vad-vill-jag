@@ -28,8 +28,16 @@ _load_env()
 # ── constants ─────────────────────────────────────────────────────────────────
 PARTIES    = ["S", "SD", "M", "V", "C", "KD", "MP", "L"]
 MODEL      = "claude-sonnet-4-6"
-N_DOCS     = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+_STATS_MODE = len(sys.argv) > 1 and sys.argv[1] == "--stats"
+N_DOCS     = int(sys.argv[1]) if len(sys.argv) > 1 and not _STATS_MODE else 10
 WORKERS    = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+
+# Optional: --since YYYY-MM-DD  e.g. python extract_questions.py 9999 10 --since 2021-09-01
+_SINCE_DATE = None
+for _i, _arg in enumerate(sys.argv):
+    if _arg == "--since" and _i + 1 < len(sys.argv):
+        _SINCE_DATE = sys.argv[_i + 1]
+        break
 OUTPUT     = "questions.json"
 BET_CACHE  = "bet-cache.json"
 ERRORS_LOG = "extraction-errors.json"
@@ -94,25 +102,14 @@ USD_TO_SEK = 10.5
 #     {
 #       "question_sv": "<Swedish: plain everyday wording; one or two sentences; last = yes/no hook>",
 #       "question_en": "<English: plain everyday wording; one or two sentences; last = yes/no hook>",
-#       "party_stances": {
-#         "S":   "for" | "against" | "abstain",
-#         "SD":  "for" | "against" | "abstain",
-#         "M":   "for" | "against" | "abstain",
-#         "V":   "for" | "against" | "abstain",
-#         "C":   "for" | "against" | "abstain",
-#         "KD":  "for" | "against" | "abstain",
-#         "MP":  "for" | "against" | "abstain",
-#         "L":   "for" | "against" | "abstain"
-#       },
-#       "punkt": "<optional committee punkt number as string, e.g. \"3\">"
+#       "punkt": "<punkt number as string, e.g. \"3\"; REQUIRED — must match one of the PUNKTs above>"
 #     }
 #   ]
 # }
 #
 # Rules: omit unsuitable items entirely (do not use null entries). Only include
-# questions that are concrete enough for a general public quiz. party_stances
-# should reflect how each party would be expected to line up on a yes answer to
-# the question, inferred from the betänkande text.
+# questions that are concrete enough for a general public quiz.
+# Every question MUST include a "punkt" field matching the document punkt it is about.
 # question_sv / question_en may each be one or two sentences: weave in brief
 # grounding from the document when needed; the last sentence must read as the
 # yes/no quiz hook. If a single sentence suffices, use only one. Within one API
@@ -120,21 +117,14 @@ USD_TO_SEK = 10.5
 # Wording must be plain enough that an ordinary adult without politics or law
 # training understands it on first read (everyday words; explain real-world
 # effects, not procedure).
+# The [Omröstning: ...] line under each punkt shows how the parties actually voted —
+# use this to understand the real political fault line and write a question that
+# reflects it accurately.
 MODEL_RESPONSE_EXAMPLE = {
     "questions": [
         {
             "question_sv": "När man överklagar vissa beslut skulle man kunna få längre tid på sig innan sista datum. Ska den tiden förlängas?",
             "question_en": "People appealing certain decisions could be given more time before the final deadline. Should that time limit be extended?",
-            "party_stances": {
-                "S": "for",
-                "SD": "against",
-                "M": "against",
-                "V": "for",
-                "C": "abstain",
-                "KD": "against",
-                "MP": "for",
-                "L": "against",
-            },
             "punkt": "2",
         }
     ]
@@ -375,7 +365,7 @@ def count_unique_vote_docs(votes):
 def ensure_data(n_docs_needed):
     """
     Load votering sessions and bet periods until we have >= n_docs_needed distinct
-    voted (rm, betänkande) pairs. Returns (all_votes, bet_cache).
+    voted (rm, betänkande) pairs. Returns (all_votes, bet_data, bet_cache).
     """
     all_votes = []
     bet_cache = load_bet_cache()
@@ -388,7 +378,7 @@ def ensure_data(n_docs_needed):
         n_docs = count_unique_vote_docs(all_votes)
         print(f"  {n_docs} distinct voted betänkanden so far\n")
 
-        _, _, bet_rm = build_index(all_votes)
+        bet_data, _, bet_rm = build_index(all_votes)
         rms_needed = set(bet_rm.values())
         loaded_bet_stems = set()
         for rm_val in rms_needed:
@@ -407,8 +397,34 @@ def ensure_data(n_docs_needed):
             break
     else:
         print(f"Ran out of sessions — only {count_unique_vote_docs(all_votes)} betänkanden available.")
+        bet_data, _, _ = build_index(all_votes)
 
-    return all_votes, bet_cache
+    return all_votes, bet_data, bet_cache
+
+# ── party stance from real votes ───────────────────────────────────────────────
+def derive_stance(party_tally, committee_approves):
+    ja  = party_tally.get("Ja", 0)
+    nej = party_tally.get("Nej", 0)
+    av  = party_tally.get("Avstår", 0)
+    if ja + nej + av == 0 or (av >= ja and av >= nej):
+        return "abstain"
+    if committee_approves:
+        return "for" if ja > nej else "against"
+    return "against" if ja > nej else "for"
+
+def tally_votes(bet_data, bet, punkt):
+    """Return {party: {rost: count}} for a given beteckning + punkt."""
+    tally = defaultdict(lambda: defaultdict(int))
+    for mp_votes in bet_data.get(bet, {}).get(punkt, {}).values():
+        for v in mp_votes:
+            tally[v.get("parti", "-")][v.get("rost", "?")] += 1
+    return tally
+
+def stances_from_votes(tally, committee_approves):
+    return {
+        party: derive_stance(tally[party], committee_approves)
+        for party in PARTIES if party in tally
+    }
 
 # ── Claude ────────────────────────────────────────────────────────────────────
 _total_in = _total_out = 0
@@ -439,7 +455,24 @@ def _normalize_party_stances(raw):
             out[p] = "abstain"
     return out
 
-def _build_document_body(titel, punkter_data):
+def _vote_summary_line(tally):
+    """Return a compact vote line e.g. 'Ja → S, M, L | Nej → SD, V | Avstår → C'"""
+    buckets = {"Ja": [], "Nej": [], "Avstår": []}
+    for party in PARTIES:
+        pt = tally.get(party, {})
+        ja, nej, av = pt.get("Ja", 0), pt.get("Nej", 0), pt.get("Avstår", 0)
+        if ja + nej + av == 0:
+            continue
+        if ja >= nej and ja >= av:
+            buckets["Ja"].append(party)
+        elif nej >= ja and nej >= av:
+            buckets["Nej"].append(party)
+        else:
+            buckets["Avstår"].append(party)
+    parts = [f"{k} → {', '.join(v)}" for k, v in buckets.items() if v]
+    return f"[Omröstning: {' | '.join(parts)}]" if parts else ""
+
+def _build_document_body(titel, punkter_data, bet_data_for_bet=None):
     lines = [f"Betänkande: {titel}", ""]
     for punkt, pd in sorted(
         punkter_data.items(),
@@ -448,6 +481,11 @@ def _build_document_body(titel, punkter_data):
         rubrik = pd.get("rubrik", "")
         forslag = pd.get("forslag", "")
         lines.append(f"PUNKT {punkt}: {rubrik}")
+        if bet_data_for_bet is not None:
+            vote_tally = tally_votes({"_": bet_data_for_bet}, "_", punkt)
+            summary = _vote_summary_line(vote_tally)
+            if summary:
+                lines.append(summary)
         lines.append(forslag)
         lines.append("")
     return "\n".join(lines)
@@ -484,6 +522,9 @@ def extract_questions_for_document(titel, document_body):
         "or 'The Riksdag has rejected proposals …' for every question. Mix structures (e.g. "
         "lead with the policy change, or only the hook, or a different factual lead-in each time) "
         "so the set reads like distinct journalism lines, not one template copied many times.\n"
+        "   Each punkt includes an [Omröstning: ...] line showing how the parties actually "
+        "voted (Ja/Nej/Avstår). Use this to understand the real political divide when "
+        "writing the question — the question should reflect what parties genuinely disagree on.\n"
         "   CONSENSUS TRAP CHECK: Before finalising each question, ask yourself — "
         "would almost any reasonable adult answer yes to this? If so, the question is "
         "useless as a quiz item regardless of how the parties voted. Reframe it around "
@@ -493,11 +534,21 @@ def extract_questions_for_document(titel, document_body):
         "to assign a named contact person to every child reported for suspected abuse?' "
         "is not. Dig into what the document actually proposes and frame the question "
         "around the specific measure, not the desirable outcome everyone already agrees on.\n"
-        "2) For EACH question, infer how each Riksdag party would align on answering YES: "
-        "for, against, or abstain. Use party keys exactly: S, SD, M, V, C, KD, MP, L.\n"
-        "3) Skip ratifications of specific past budgets, pure procedural one-offs, COVID-only "
+        "   POLICY STANCE RULE: The question must ask whether a policy is right, not what "
+        "the Riksdag did or should procedurally do. Never frame questions as 'Did the Riksdag "
+        "vote for X?', 'Was it right that riksdagen decided Y?', or 'Should riksdagen pass Z?' — "
+        "ask about the underlying policy: 'Should X be done?' If you cannot frame it as a "
+        "genuine policy opinion question, do not include it.\n"
+        "   NO PARTY NAMES IN QUESTIONS: Never mention specific party names (S, SD, M, V, C, "
+        "KD, MP, L, Socialdemokraterna, Sverigedemokraterna, Moderaterna, etc.) in the question "
+        "text. The question must stand on its own without telling the reader who voted how. "
+        "If a question cannot be written without naming parties, do not include it.\n"
+        "   Every question MUST include a 'punkt' field with the punkt number it corresponds to.\n"
+        "2) Skip ratifications of specific past budgets, pure procedural one-offs, COVID-only "
         "temporary measures, or anything without concrete policy content.\n\n"
-        "Reply ONLY with valid JSON of this exact shape (see keys and types):\n"
+        "Output ONLY the raw JSON object — no analysis, no explanation, no reasoning text "
+        "before or after. If nothing is suitable, output {\"questions\": []}.\n\n"
+        "Required shape:\n"
         f"{schema_hint}\n\n"
         "--- DOCUMENT ---\n\n"
         f"{document_body}"
@@ -520,12 +571,62 @@ def extract_questions_for_document(titel, document_body):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"    [{ts}] tokens: {in_tok} in / {out_tok} out  |  {cost_sek:.3f} kr  |  running: {running_cost:.2f} kr", flush=True)
 
-    raw = re.sub(r"^```[a-z]*\n?", "", msg.content[0].text.strip())
-    raw = re.sub(r"\n?```$", "", raw)
-    data = json.loads(raw)
+    full_text = msg.content[0].text.strip()
+
+    # 1. Try a ```json ... ``` block anywhere in the response
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", full_text, re.DOTALL)
+    # 2. Fall back to first { ... last }
+    brace_match = re.search(r"\{.*\}", full_text, re.DOTALL)
+
+    raw = None
+    if fence_match:
+        raw = fence_match.group(1)
+    elif brace_match:
+        raw = brace_match.group(0)
+
+    if not raw:
+        # Sonnet returned only analysis with no JSON — treat as zero valid questions
+        print(f"    (no JSON in response — Sonnet found nothing suitable)", flush=True)
+        return []
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        preview = raw[:300].replace("\n", "\\n")
+        raise ValueError(f"json_decode_error: {exc} | response preview: {preview}") from exc
+
     items = data.get("questions")
     if not isinstance(items, list):
         raise ValueError("missing_questions_array")
+
+    _PARTY_NAMES = {
+        "socialdemokraterna", "sverigedemokraterna", "moderaterna", "vänsterpartiet",
+        "centerpartiet", "kristdemokraterna", "miljöpartiet", "liberalerna",
+        " s ", " sd ", " m ", " v ", " c ", " kd ", " mp ", " l ",
+    }
+
+    def _has_party_name(text):
+        lower = f" {text.lower()} "
+        return any(p in lower for p in _PARTY_NAMES)
+
+    _PROCEDURAL_TRIGGERS_SV = [
+        "röstade riksdagen", "röstat riksdagen", "var det rätt att riksdagen",
+        "var det rätt att göra det", "ska riksdagen besluta", "bör riksdagen besluta",
+        "bör riksdagen anta", "ska riksdagen anta",
+    ]
+    _PROCEDURAL_TRIGGERS_EN = [
+        "did parliament", "did the riksdag", "was it right that", "should parliament vote",
+        "should the riksdag vote", "should the riksdag decide", "should parliament decide",
+        "should parliament pass", "should the riksdag pass",
+    ]
+
+    def _is_procedural(qsv, qen):
+        lower_sv = qsv.lower()
+        lower_en = qen.lower()
+        return (
+            any(t in lower_sv for t in _PROCEDURAL_TRIGGERS_SV)
+            or any(t in lower_en for t in _PROCEDURAL_TRIGGERS_EN)
+        )
 
     validated = []
     for row in items:
@@ -533,18 +634,94 @@ def extract_questions_for_document(titel, document_body):
             continue
         qsv = (row.get("question_sv") or "").strip()
         qen = (row.get("question_en") or "").strip()
-        st = _normalize_party_stances(row.get("party_stances"))
-        if not qsv or not qen or not st:
+        pk = str(row.get("punkt") or "").strip()
+        if not qsv or not qen or not pk:
             continue
-        entry = {"question_sv": qsv, "question_en": qen, "party_stances": st}
-        pk = row.get("punkt")
-        if pk is not None and str(pk).strip():
-            entry["punkt"] = str(pk).strip()
-        validated.append(entry)
+        if _has_party_name(qsv) or _has_party_name(qen):
+            continue
+        if _is_procedural(qsv, qen):
+            continue
+        validated.append({"question_sv": qsv, "question_en": qen, "punkt": pk})
     return validated
 
+# ── stats mode ────────────────────────────────────────────────────────────────
+if _STATS_MODE:
+    print("Loading all sessions for stats (no Sonnet calls)...\n")
+    all_votes, bet_data, bet_cache = ensure_data(999_999)
+
+    docs_total = docs_in_cache = docs_with_forslag = 0
+    punkter_total = punkter_with_forslag = punkter_with_votes = punkter_full_match = 0
+    by_rm = defaultdict(lambda: {"docs": 0, "full_match": 0})
+
+    seen_docs = set()
+    for bet, punkter_votes in bet_data.items():
+        first_vote = next(
+            (v for vl in punkter_votes.values() for mv in vl.values() for v in mv),
+            None,
+        )
+        if not first_vote:
+            continue
+        rm = first_vote.get("rm", "")
+        latest_date = max(
+            (v.get("datum") or "" for vl in punkter_votes.values() for mv in vl.values() for v in mv),
+            default="",
+        )
+        if _SINCE_DATE and latest_date[:10] < _SINCE_DATE:
+            continue
+        if (rm, bet) in seen_docs:
+            continue
+        seen_docs.add((rm, bet))
+        docs_total += 1
+        cache_key = f"{rm}|{bet}"
+        cache_entry = bet_cache.get(cache_key, {})
+        cache_punkter = cache_entry.get("punkter", {})
+
+        has_any_forslag = any(p.get("forslag") for p in cache_punkter.values())
+        if cache_entry:
+            docs_in_cache += 1
+        if has_any_forslag:
+            docs_with_forslag += 1
+
+        doc_full = 0
+        for punkt in punkter_votes:
+            punkter_total += 1
+            ck = _resolve_punkt_key(punkt, cache_punkter)
+            has_forslag = bool(ck and cache_punkter.get(ck, {}).get("forslag"))
+            has_votes = bool(punkter_votes[punkt])
+            if has_forslag:
+                punkter_with_forslag += 1
+            if has_votes:
+                punkter_with_votes += 1
+            if has_forslag and has_votes:
+                punkter_full_match += 1
+                doc_full += 1
+
+        by_rm[rm]["docs"] += 1
+        by_rm[rm]["full_match"] += doc_full
+
+    W = 50
+    print(f"{'─'*W}")
+    print(f"  PIPELINE STATS (no Sonnet)" + (f" — since {_SINCE_DATE}" if _SINCE_DATE else ""))
+    print(f"{'─'*W}")
+    print(f"  Voted betänkanden total       : {docs_total:>6}")
+    print(f"  In bet-cache                  : {docs_in_cache:>6}")
+    print(f"  With ≥1 forslag text          : {docs_with_forslag:>6}")
+    print()
+    print(f"  Voted punkter total           : {punkter_total:>6}")
+    print(f"  With forslag text in cache    : {punkter_with_forslag:>6}")
+    print(f"  With vote rows                : {punkter_with_votes:>6}")
+    print(f"  FULL MATCH (votes + forslag)  : {punkter_full_match:>6}  ← max possible questions before Sonnet")
+    print()
+    print(f"  BY SESSION")
+    print(f"  {'rm':<12} {'docs':>6}  {'full match punkter':>20}")
+    print(f"  {'─'*42}")
+    for rm in sorted(by_rm, reverse=True):
+        print(f"  {rm:<12} {by_rm[rm]['docs']:>6}  {by_rm[rm]['full_match']:>20}")
+    print(f"{'─'*W}")
+    sys.exit(0)
+
 # ── main ──────────────────────────────────────────────────────────────────────
-all_votes, bet_cache = ensure_data(N_DOCS)
+all_votes, bet_data, bet_cache = ensure_data(N_DOCS)
 
 doc_dates = {}
 for v in all_votes:
@@ -559,10 +736,15 @@ for v in all_votes:
         doc_dates[k] = d
 
 all_doc_keys = sorted(doc_dates.keys(), key=lambda k: doc_dates[k], reverse=True)
+
+if _SINCE_DATE:
+    all_doc_keys = [k for k in all_doc_keys if doc_dates[k][:10] >= _SINCE_DATE]
+
 selected_docs = all_doc_keys[:N_DOCS]
 selected_doc_dates = {k: doc_dates[k] for k in selected_docs}
 
-print(f"Distinct voted betänkanden available: {len(all_doc_keys)}")
+print(f"Distinct voted betänkanden available: {len(all_doc_keys)}" +
+      (f" (since {_SINCE_DATE})" if _SINCE_DATE else ""))
 print(f"Processing the {N_DOCS} most recent (by latest vote date)...\n")
 
 if os.path.exists(OUTPUT):
@@ -603,7 +785,7 @@ def process_document(rm, bet):
         _record_error(rm, bet, "no_forslag_text")
         return []
 
-    body = _build_document_body(titel, all_bet_punkter)
+    body = _build_document_body(titel, all_bet_punkter, bet_data_for_bet=bet_data.get(bet))
     try:
         print(f"  {bet} [{rm}] ({titel[:45]}): calling Sonnet...", flush=True)
         rows = extract_questions_for_document(titel, body)
@@ -623,7 +805,9 @@ def process_document(rm, bet):
 
     committee_code, cat_sv, cat_en = _get_category(bet)
     dok_id_out = bet_info.get("dok_id", dok_id)
+    bet_vote_data = bet_data.get(bet, {})
     new_items = []
+    skipped_no_votes = 0
     for qi, row in enumerate(rows):
         item_id = f"{rm}_{bet}_q{qi}"
         if item_id in existing_ids:
@@ -631,6 +815,21 @@ def process_document(rm, bet):
         punkt = row.get("punkt", "")
         ck = _resolve_punkt_key(punkt, all_bet_punkter) if punkt else None
         pd = all_bet_punkter.get(ck, {}) if ck else {}
+
+        # Resolve punkt key against vote data (votering may use different string form)
+        vote_punkt_key = _resolve_punkt_key(punkt, bet_vote_data) if punkt else None
+        if not vote_punkt_key:
+            skipped_no_votes += 1
+            continue
+
+        vote_tally = tally_votes({"_": bet_vote_data}, "_", vote_punkt_key)
+        forslag_text = pd.get("forslag", "").lower()
+        committee_approves = "bifaller" in forslag_text
+        party_stances = stances_from_votes(vote_tally, committee_approves)
+        if not party_stances:
+            skipped_no_votes += 1
+            continue
+
         punkt_type = _detect_punkt_type(pd.get("forslag", "")) if pd.get("forslag") else "other"
         new_items.append({
             "id":            item_id,
@@ -647,8 +846,10 @@ def process_document(rm, bet):
             "question_sv":   row["question_sv"],
             "question_en":   row["question_en"],
             "url":           f"https://data.riksdagen.se/dokument/{dok_id_out}" if dok_id_out else "",
-            "party_stances": row["party_stances"],
+            "party_stances": party_stances,
         })
+    if skipped_no_votes:
+        print(f"    {bet}: {skipped_no_votes} question(s) skipped — no matching vote data", flush=True)
     return new_items
 
 print(f"Running with {WORKERS} parallel workers\n")
@@ -694,9 +895,11 @@ if empty:
 else:
     print(f"All {len(results)} questions have question text.")
 
+import random as _random
+_sample = _random.sample(results, min(25, len(results)))
 print(f"\n{'─'*60}")
-print(f"  SAMPLE — first 10 Swedish questions")
+print(f"  SAMPLE — 25 random Swedish questions")
 print(f"{'─'*60}")
-for i, r in enumerate(results[:10], 1):
+for i, r in enumerate(_sample, 1):
     print(f"  {i:>2}. [{r.get('beteckning','')}] {r.get('question_sv','')}")
 print(f"{'─'*60}")
