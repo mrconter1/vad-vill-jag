@@ -19,10 +19,6 @@ by_type = defaultdict(int)
 for q in questions:
     by_type[q.get("type", "?")] += 1
 
-by_outcome = defaultdict(int)
-for q in questions:
-    by_outcome[q.get("outcome", "?")] += 1
-
 print(f"{'─'*50}")
 print(f"  QUESTIONS.JSON STATS")
 print(f"{'─'*50}")
@@ -51,10 +47,4 @@ print()
 print(f"  BY TYPE")
 for t, n in sorted(by_type.items(), key=lambda x: -x[1]):
     print(f"  {t:<30} {n:>6}")
-print()
-
-print(f"  BY OUTCOME")
-for o, n in sorted(by_outcome.items(), key=lambda x: -x[1]):
-    pct = n / total * 100
-    print(f"  {o:<20} {n:>6}  ({pct:.1f}%)")
 print(f"{'─'*50}")

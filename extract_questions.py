@@ -27,12 +27,20 @@ _load_env()
 
 # ── constants ─────────────────────────────────────────────────────────────────
 PARTIES    = ["S", "SD", "M", "V", "C", "KD", "MP", "L"]
-MODEL      = "claude-opus-4-6"
-N_PUNKTER  = int(sys.argv[1]) if len(sys.argv) > 1 else 10
+MODEL      = "claude-sonnet-4-6"
+N_DOCS     = int(sys.argv[1]) if len(sys.argv) > 1 else 10
 WORKERS    = int(sys.argv[2]) if len(sys.argv) > 2 else 5
 OUTPUT     = "questions.json"
 BET_CACHE  = "bet-cache.json"
+ERRORS_LOG = "extraction-errors.json"
 BASE_URL   = "https://data.riksdagen.se/dataset"
+
+# If the assembled user message (instructions + document) exceeds this character count,
+# we skip the API call, log extraction-errors.json, and continue.
+MAX_USER_MESSAGE_CHARS = 320_000
+
+PRICE_IN   = 3.0  / 1_000_000
+PRICE_OUT  = 15.0 / 1_000_000
 
 COMMITTEE_CATEGORIES = {
     "AU":  {"sv": "Arbetsmarknad",             "en": "Labor Market"},
@@ -74,9 +82,63 @@ def _detect_punkt_type(forslag_text):
         return "proposition_and_motion"
     return "other"
 
-PRICE_IN   = 5.0  / 1_000_000
-PRICE_OUT  = 25.0 / 1_000_000
 USD_TO_SEK = 10.5
+
+# ── Expected JSON from Claude (Sonnet) ───────────────────────────────────────
+# The model must reply with ONLY this JSON shape (no markdown fences). We parse it
+# with json.loads after stripping optional ``` fences from the assistant text.
+#
+# Top-level object:
+# {
+#   "questions": [
+#     {
+#       "question_sv": "<Swedish: plain everyday wording; one or two sentences; last = yes/no hook>",
+#       "question_en": "<English: plain everyday wording; one or two sentences; last = yes/no hook>",
+#       "party_stances": {
+#         "S":   "for" | "against" | "abstain",
+#         "SD":  "for" | "against" | "abstain",
+#         "M":   "for" | "against" | "abstain",
+#         "V":   "for" | "against" | "abstain",
+#         "C":   "for" | "against" | "abstain",
+#         "KD":  "for" | "against" | "abstain",
+#         "MP":  "for" | "against" | "abstain",
+#         "L":   "for" | "against" | "abstain"
+#       },
+#       "punkt": "<optional committee punkt number as string, e.g. \"3\">"
+#     }
+#   ]
+# }
+#
+# Rules: omit unsuitable items entirely (do not use null entries). Only include
+# questions that are concrete enough for a general public quiz. party_stances
+# should reflect how each party would be expected to line up on a yes answer to
+# the question, inferred from the betänkande text.
+# question_sv / question_en may each be one or two sentences: weave in brief
+# grounding from the document when needed; the last sentence must read as the
+# yes/no quiz hook. If a single sentence suffices, use only one. Within one API
+# response, openings must be varied (no copy-paste template across questions).
+# Wording must be plain enough that an ordinary adult without politics or law
+# training understands it on first read (everyday words; explain real-world
+# effects, not procedure).
+MODEL_RESPONSE_EXAMPLE = {
+    "questions": [
+        {
+            "question_sv": "När man överklagar vissa beslut skulle man kunna få längre tid på sig innan sista datum. Ska den tiden förlängas?",
+            "question_en": "People appealing certain decisions could be given more time before the final deadline. Should that time limit be extended?",
+            "party_stances": {
+                "S": "for",
+                "SD": "against",
+                "M": "against",
+                "V": "for",
+                "C": "abstain",
+                "KD": "against",
+                "MP": "for",
+                "L": "against",
+            },
+            "punkt": "2",
+        }
+    ]
+}
 
 # Sessions ordered newest → oldest
 VOTERING_SESSIONS = [
@@ -180,6 +242,60 @@ def _load_session(rm, stem):
     print(f"    Saved {len(votes)} records to {cache_file}", flush=True)
     return votes
 
+# ── dokumentstatus / punkt parsing ────────────────────────────────────────────
+def _punkter_from_dokumentstatus_ds(ds):
+    """Build punkt → {rubrik, forslag} from a dokumentstatus object (same shape as bulk zips)."""
+    punkter = {}
+    forslags = ds.get("dokutskottsforslag", {}).get("utskottsforslag", []) or []
+    if isinstance(forslags, dict):
+        forslags = [forslags]
+    for uf in forslags:
+        punkt = uf.get("punkt", "")
+        rubrik = uf.get("rubrik", "")
+        raw_f = uf.get("forslag", "") or ""
+        forslag = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_f)).strip()
+        if punkt:
+            punkter[punkt] = {"rubrik": rubrik, "forslag": forslag}
+    return punkter
+
+
+def _resolve_punkt_key(punkt, punkter_dict):
+    """
+    Map votering punkt string to a key present in punkter_dict.
+    Handles whitespace and numeric variants (e.g. '7' vs '07').
+    """
+    if punkt in punkter_dict:
+        return punkt
+    s = str(punkt).strip()
+    if s in punkter_dict:
+        return s
+    if s.isdigit():
+        n = int(s)
+        for candidate in (str(n), str(n).zfill(2), str(n).zfill(3)):
+            if candidate in punkter_dict:
+                return candidate
+        for k in punkter_dict:
+            ks = str(k).strip()
+            if ks.isdigit() and int(ks) == n:
+                return k
+    return None
+
+
+def _fetch_dokumentstatus_punkter(dok_id):
+    """Fetch live dokumentstatus JSON; returns punkt dict or None on failure."""
+    if not dok_id:
+        return None
+    url = f"https://data.riksdagen.se/dokumentstatus/{dok_id}.json"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            raw = json.load(resp)
+    except Exception:
+        return None
+    ds = raw.get("dokumentstatus", {})
+    return _punkter_from_dokumentstatus_ds(ds) or None
+
+
 # ── bet cache loading ─────────────────────────────────────────────────────────
 def _load_bet_period(stem, bet_cache):
     """Download a bet period zip and merge its data into bet_cache in place."""
@@ -205,17 +321,7 @@ def _load_bet_period(stem, bet_cache):
             dok_id     = doc.get("dok_id", "")
             if not beteckning:
                 continue
-            punkter = {}
-            forslags = ds.get("dokutskottsforslag", {}).get("utskottsforslag", []) or []
-            if isinstance(forslags, dict):
-                forslags = [forslags]
-            for uf in forslags:
-                punkt  = uf.get("punkt", "")
-                rubrik = uf.get("rubrik", "")
-                raw_f  = uf.get("forslag", "") or ""
-                forslag = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw_f)).strip()
-                if punkt:
-                    punkter[punkt] = {"rubrik": rubrik, "forslag": forslag}
+            punkter = _punkter_from_dokumentstatus_ds(ds)
             key = f"{rm_val}|{beteckning}"
             if key not in bet_cache:
                 bet_cache[key] = {"titel": titel, "dok_id": dok_id, "punkter": punkter}
@@ -256,38 +362,39 @@ def build_index(votes):
         bet_rm[bet] = v.get("rm", "")
     return bet_data, bet_dates, bet_rm
 
-def count_punkter(bet_data):
-    return sum(len(punkter) for punkter in bet_data.values())
+def count_unique_vote_docs(votes):
+    seen = set()
+    for v in votes:
+        if v.get("avser") != "sakfrågan":
+            continue
+        bet, rm = v.get("beteckning", ""), v.get("rm", "")
+        if bet and rm:
+            seen.add((rm, bet))
+    return len(seen)
 
-def ensure_data(n_needed):
+def ensure_data(n_docs_needed):
     """
-    Load votering sessions and bet periods until we have >= n_needed punkter.
-    Returns (all_votes, bet_data, bet_dates, bet_rm, bet_cache).
+    Load votering sessions and bet periods until we have >= n_docs_needed distinct
+    voted (rm, betänkande) pairs. Returns (all_votes, bet_cache).
     """
     all_votes = []
-    loaded_stems = set()
     bet_cache = load_bet_cache()
 
     for rm, stem in VOTERING_SESSIONS:
         print(f"Loading session {rm} ({stem})...", flush=True)
         session_votes = _load_session(rm, stem)
         all_votes.extend(session_votes)
-        loaded_stems.add(stem)
 
-        bet_data, bet_dates, bet_rm = build_index(all_votes)
-        n = count_punkter(bet_data)
-        print(f"  {n} voted punkter so far\n")
+        n_docs = count_unique_vote_docs(all_votes)
+        print(f"  {n_docs} distinct voted betänkanden so far\n")
 
-        # Ensure bet data covers all rms in this batch
+        _, _, bet_rm = build_index(all_votes)
         rms_needed = set(bet_rm.values())
         loaded_bet_stems = set()
         for rm_val in rms_needed:
             bet_stem = _bet_stem_for_rm(rm_val)
-            if not bet_stem:
+            if not bet_stem or bet_stem in loaded_bet_stems:
                 continue
-            if bet_stem in loaded_bet_stems:
-                continue
-            # Check if bet_cache already covers this rm
             has_coverage = any(k.startswith(f"{rm_val}|") for k in bet_cache)
             if not has_coverage:
                 print(f"  Fetching bet data for {rm_val} ({bet_stem})...", flush=True)
@@ -296,89 +403,167 @@ def ensure_data(n_needed):
                 print(f"  bet-cache.json updated ({len(bet_cache)} entries)\n")
             loaded_bet_stems.add(bet_stem)
 
-        if n >= n_needed:
+        if n_docs >= n_docs_needed:
             break
     else:
-        print(f"Ran out of sessions — only {count_punkter(bet_data)} punkter available.")
+        print(f"Ran out of sessions — only {count_unique_vote_docs(all_votes)} betänkanden available.")
 
-    return all_votes, bet_data, bet_dates, bet_rm, bet_cache
-
-# ── party stance ──────────────────────────────────────────────────────────────
-def derive_stance(party_tally, committee_approves):
-    ja  = party_tally.get("Ja", 0)
-    nej = party_tally.get("Nej", 0)
-    av  = party_tally.get("Avstår", 0)
-    if ja + nej + av == 0 or av >= ja and av >= nej:
-        return "abstain"
-    if committee_approves:
-        return "for" if ja > nej else "against"
-    return "against" if ja > nej else "for"
+    return all_votes, bet_cache
 
 # ── Claude ────────────────────────────────────────────────────────────────────
 _total_in = _total_out = 0
+_errors_lock = threading.Lock()
+_extraction_errors = []
 
-def extract_questions_for_bet(titel, punkter_data):
+def _record_error(rm, bet, code, detail=None):
+    with _errors_lock:
+        _extraction_errors.append({
+            "rm": rm,
+            "beteckning": bet,
+            "error": code,
+            "detail": detail,
+            "at": datetime.now().isoformat(timespec="seconds"),
+        })
+
+_ALLOWED_STANCES = frozenset({"for", "against", "abstain"})
+
+def _normalize_party_stances(raw):
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for p in PARTIES:
+        v = raw.get(p)
+        if isinstance(v, str) and v.strip().lower() in _ALLOWED_STANCES:
+            out[p] = v.strip().lower()
+        else:
+            out[p] = "abstain"
+    return out
+
+def _build_document_body(titel, punkter_data):
+    lines = [f"Betänkande: {titel}", ""]
+    for punkt, pd in sorted(
+        punkter_data.items(),
+        key=lambda x: int(x[0]) if str(x[0]).strip().isdigit() else 0,
+    ):
+        rubrik = pd.get("rubrik", "")
+        forslag = pd.get("forslag", "")
+        lines.append(f"PUNKT {punkt}: {rubrik}")
+        lines.append(forslag)
+        lines.append("")
+    return "\n".join(lines)
+
+def extract_questions_for_document(titel, document_body):
+    """
+    One Sonnet call per betänkande. Returns a list of validated question dicts
+    (question_sv, question_en, party_stances, optional punkt) or raises on API/JSON failure.
+    """
     global _total_in, _total_out
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    sections = []
-    for punkt, pd in sorted(punkter_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
-        ptype = _detect_punkt_type(pd.get("forslag", ""))
-        type_hint = ""
-        if ptype in ("proposition", "proposition_and_motion"):
-            type_hint = " [This involves a government proposition — frame the question around what the government proposes to do]"
-        sections.append(f"PUNKT {punkt}: {pd['rubrik']}{type_hint}\n{pd['forslag'][:600]}")
+    schema_hint = json.dumps(MODEL_RESPONSE_EXAMPLE, ensure_ascii=False, indent=2)
     prompt = (
-        f"Betänkande: {titel}\n\n"
-        + "\n\n---\n\n".join(sections)
-        + "\n\n---\n\n"
-        "For each PUNKT above, write a single question in the style of quality journalism: "
-        "clear and specific enough for an expert to find it accurate, but immediately "
-        "understandable to anyone without political background. Focus on the real-world "
-        "effect — what would actually change for people or society. "
-        "When a punkt involves a government proposition, frame the question around the "
-        "government's proposed change (e.g. 'Should the government be allowed to...'). "
-        "When it involves opposition motions, frame it around the proposed alternative. "
-        "Use neutral, formal language — no slang, no colloquialisms (e.g. never use 'schyssta', 'kolla', 'fixa'). "
-        "Avoid procedural jargon like 'motion', 'betänkande', 'utskott', 'yrkande'. "
-        "No em dashes. One sentence per punkt. Phrased so the person can answer yes or no.\n\n"
-        "IMPORTANT: Some punkter are not suitable for a general public quiz. "
-        "Return null for a punkt if it is: a ratification of a specific past budget or emergency measure, "
-        "a one-time procedural vote (e.g. approving an audit report, ratifying a specific year's guidelines), "
-        "a COVID-specific temporary measure, or so vague that it has no concrete policy content "
-        "(e.g. 'do you agree with unspecified motions from the general debate'). "
-        "These should not be shown to quiz users.\n\n"
-        "Reply ONLY with JSON where each key is the punkt number and the value is either "
-        "an object with 'sv' and 'en' fields, or null if not suitable.\n"
-        'Example: {"2": {"sv": "Ska arbetsgivare tvingas...", "en": "Should employers be required to..."}, "3": null}'
+        "You are given the full text of a Swedish parliamentary committee report (betänkande) "
+        "with utskottsforslag (committee proposals) per punkt.\n\n"
+        "Task:\n"
+        "1) Produce zero or more valid quiz questions. For each, question_sv and question_en "
+        "may be one or at most two sentences. When readers need a line of grounding from the "
+        "document (what is proposed, scope, who is affected), put it in the same field as the "
+        "first sentence; the final sentence must read as a clear yes/no hook. If one sentence "
+        "is enough, use only one. Tone: serious and neutral, but in plain language an "
+        "ordinary person uses every day — not administration-speak, legalese, or insider "
+        "parliamentary phrasing. No slang. No em dashes. Someone with no special interest in "
+        "politics should understand every word on first read; prefer concrete outcomes "
+        "(what would change for people, companies, or society) over process framing such as "
+        "'should the Riksdag decide …' or 'should Parliament approve …' unless you cannot "
+        "express the substance otherwise. When the source text is technical, translate the "
+        "idea into normal words. In Swedish, avoid stiff fillers like 'är föremål för', "
+        "'föreslås att', 'i enlighet med de framlagda förslagen', 'har ifrågasatts från "
+        "flera håll' when a shorter, direct wording works. Avoid words like motion, "
+        "betänkande, utskott, yrkande in the question text.\n"
+        "   Within this single response, vary how each question begins: do not repeat the same "
+        "opening pattern across items. In particular avoid leaning on stock openers such as "
+        "'Det finns förslag om …', 'There are proposals …', 'Riksdagen har avslagit förslag om …', "
+        "or 'The Riksdag has rejected proposals …' for every question. Mix structures (e.g. "
+        "lead with the policy change, or only the hook, or a different factual lead-in each time) "
+        "so the set reads like distinct journalism lines, not one template copied many times.\n"
+        "   CONSENSUS TRAP CHECK: Before finalising each question, ask yourself — "
+        "would almost any reasonable adult answer yes to this? If so, the question is "
+        "useless as a quiz item regardless of how the parties voted. Reframe it around "
+        "the actual fault line: the mechanism, cost, trade-off, or restriction that "
+        "divides parties. For example, 'Should children exposed to violence get more "
+        "protection?' is a consensus trap; 'Should municipalities be legally required "
+        "to assign a named contact person to every child reported for suspected abuse?' "
+        "is not. Dig into what the document actually proposes and frame the question "
+        "around the specific measure, not the desirable outcome everyone already agrees on.\n"
+        "2) For EACH question, infer how each Riksdag party would align on answering YES: "
+        "for, against, or abstain. Use party keys exactly: S, SD, M, V, C, KD, MP, L.\n"
+        "3) Skip ratifications of specific past budgets, pure procedural one-offs, COVID-only "
+        "temporary measures, or anything without concrete policy content.\n\n"
+        "Reply ONLY with valid JSON of this exact shape (see keys and types):\n"
+        f"{schema_hint}\n\n"
+        "--- DOCUMENT ---\n\n"
+        f"{document_body}"
     )
-    msg = client.messages.create(model=MODEL, max_tokens=1024,
-                                  messages=[{"role": "user", "content": prompt}])
+
+    if len(prompt) > MAX_USER_MESSAGE_CHARS:
+        raise ValueError("context_too_large", len(prompt))
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    msg = client.messages.create(
+        model=MODEL,
+        max_tokens=16384,
+        messages=[{"role": "user", "content": prompt}],
+    )
     in_tok, out_tok = msg.usage.input_tokens, msg.usage.output_tokens
-    _total_in  += in_tok
+    _total_in += in_tok
     _total_out += out_tok
     cost_sek = (in_tok * PRICE_IN + out_tok * PRICE_OUT) * USD_TO_SEK
     running_cost = (_total_in * PRICE_IN + _total_out * PRICE_OUT) * USD_TO_SEK
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"    [{ts}] tokens: {in_tok} in / {out_tok} out  |  {cost_sek:.3f} kr  |  running: {running_cost:.2f} kr", flush=True)
+
     raw = re.sub(r"^```[a-z]*\n?", "", msg.content[0].text.strip())
     raw = re.sub(r"\n?```$", "", raw)
-    return json.loads(raw)
+    data = json.loads(raw)
+    items = data.get("questions")
+    if not isinstance(items, list):
+        raise ValueError("missing_questions_array")
+
+    validated = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        qsv = (row.get("question_sv") or "").strip()
+        qen = (row.get("question_en") or "").strip()
+        st = _normalize_party_stances(row.get("party_stances"))
+        if not qsv or not qen or not st:
+            continue
+        entry = {"question_sv": qsv, "question_en": qen, "party_stances": st}
+        pk = row.get("punkt")
+        if pk is not None and str(pk).strip():
+            entry["punkt"] = str(pk).strip()
+        validated.append(entry)
+    return validated
 
 # ── main ──────────────────────────────────────────────────────────────────────
-_, bet_data, bet_dates, bet_rm, bet_cache = ensure_data(N_PUNKTER)
+all_votes, bet_cache = ensure_data(N_DOCS)
 
-all_punkter = []
-for bet in sorted(bet_dates, key=lambda b: bet_dates[b], reverse=True):
-    for punkt in sorted(bet_data[bet], key=lambda x: int(x) if x.isdigit() else 0):
-        all_punkter.append((bet, punkt, bet_dates[bet][:10], bet_rm.get(bet, "2025/26")))
+doc_dates = {}
+for v in all_votes:
+    if v.get("avser") != "sakfrågan":
+        continue
+    bet_val, rm_val = v.get("beteckning", ""), v.get("rm", "")
+    if not bet_val or not rm_val:
+        continue
+    k = (rm_val, bet_val)
+    d = v.get("datum") or ""
+    if d > doc_dates.get(k, ""):
+        doc_dates[k] = d
 
-print(f"Total voted punkter available: {len(all_punkter)}")
-print(f"Processing the {N_PUNKTER} most recent...\n")
-selected = all_punkter[:N_PUNKTER]
+all_doc_keys = sorted(doc_dates.keys(), key=lambda k: doc_dates[k], reverse=True)
+selected_docs = all_doc_keys[:N_DOCS]
+selected_doc_dates = {k: doc_dates[k] for k in selected_docs}
 
-by_bet = defaultdict(list)
-for bet, punkt, datum, rm in selected:
-    by_bet[(rm, bet)].append((punkt, datum, rm))
+print(f"Distinct voted betänkanden available: {len(all_doc_keys)}")
+print(f"Processing the {N_DOCS} most recent (by latest vote date)...\n")
 
 if os.path.exists(OUTPUT):
     with open(OUTPUT, encoding="utf-8") as f:
@@ -393,96 +578,82 @@ else:
 
 _points_done = len(existing_ids)
 _save_lock   = threading.Lock()
+_bet_cache_lock = threading.Lock()
 
-def process_bet(bet, punkt_list):
-    rm              = punkt_list[0][2]
-    bet_info        = bet_cache.get(f"{rm}|{bet}", {})
-    titel           = bet_info.get("titel", bet)
-    all_bet_punkter = bet_info.get("punkter", {})
+def process_document(rm, bet):
+    datum = (selected_doc_dates.get((rm, bet), "") or "")[:10]
+    cache_key = f"{rm}|{bet}"
+    bet_info = bet_cache.get(cache_key, {})
+    titel = bet_info.get("titel", bet)
+    dok_id = bet_info.get("dok_id", "")
+    all_bet_punkter = dict(bet_info.get("punkter", {}))
 
-    relevant = {
-        p: all_bet_punkter[p]
-        for p, _, _ in punkt_list
-        if p in all_bet_punkter and all_bet_punkter[p].get("forslag")
-    }
+    if not all_bet_punkter and dok_id:
+        fresh = _fetch_dokumentstatus_punkter(dok_id)
+        if fresh:
+            all_bet_punkter.update(fresh)
+            with _bet_cache_lock:
+                entry = bet_cache.setdefault(cache_key, {"titel": titel, "dok_id": dok_id, "punkter": {}})
+                entry.setdefault("punkter", {}).update(fresh)
+                if dok_id and not entry.get("dok_id"):
+                    entry["dok_id"] = dok_id
 
-    if not relevant:
-        print(f"  {bet}: no forslag text, skipping", flush=True)
-        questions_map = {}
-    else:
-        print(f"  {bet} [{rm}] ({titel[:45]}): calling Claude for {len(relevant)} punkter...", flush=True)
-        try:
-            questions_map = extract_questions_for_bet(titel, relevant)
-        except Exception as e:
-            print(f"    Claude error on {bet}: {e}", flush=True)
-            questions_map = {}
+    if not any((all_bet_punkter.get(k) or {}).get("forslag") for k in all_bet_punkter):
+        print(f"  {bet} [{rm}]: no forslag text, skipping", flush=True)
+        _record_error(rm, bet, "no_forslag_text")
+        return []
 
+    body = _build_document_body(titel, all_bet_punkter)
+    try:
+        print(f"  {bet} [{rm}] ({titel[:45]}): calling Sonnet...", flush=True)
+        rows = extract_questions_for_document(titel, body)
+    except ValueError as e:
+        if e.args and e.args[0] == "context_too_large":
+            nch = e.args[1] if len(e.args) > 1 else None
+            _record_error(rm, bet, "context_too_large", nch)
+            print(f"    SKIP context too large ({nch} chars in full prompt)", flush=True)
+        else:
+            _record_error(rm, bet, "value_error", str(e))
+            print(f"    Error: {e}", flush=True)
+        return []
+    except Exception as e:
+        _record_error(rm, bet, "claude_error", str(e))
+        print(f"    Claude error on {bet}: {e}", flush=True)
+        return []
+
+    committee_code, cat_sv, cat_en = _get_category(bet)
+    dok_id_out = bet_info.get("dok_id", dok_id)
     new_items = []
-    for punkt, datum, rm in punkt_list:
-        item_id = f"{rm}_{bet}_{punkt}"
+    for qi, row in enumerate(rows):
+        item_id = f"{rm}_{bet}_q{qi}"
         if item_id in existing_ids:
             continue
-
-        tally = defaultdict(lambda: defaultdict(int))
-        for vid, mp_votes in bet_data[bet][punkt].items():
-            for v in mp_votes:
-                tally[v.get("parti", "-")][v.get("rost", "?")] += 1
-
-        ja_total           = sum(tally[p].get("Ja", 0) for p in tally)
-        nej_total          = sum(tally[p].get("Nej", 0) for p in tally)
-        committee_won      = ja_total > nej_total
-        pd                 = all_bet_punkter.get(punkt, {})
-        forslag_text       = pd.get("forslag", "").lower()
-        committee_approves = "bifaller" in forslag_text
-
-        if not forslag_text:
-            outcome = "unknown"
-        elif committee_won:
-            outcome = "approved" if committee_approves else "rejected"
-        else:
-            outcome = "rejected" if committee_approves else "approved"
-
-        party_stances = {
-            party: derive_stance(tally[party], committee_approves)
-            for party in PARTIES if party in tally
-        }
-
-        q_sv = questions_map.get(punkt, {})
-        if q_sv is None:
-            continue  # Claude flagged as not suitable
-        q_sv_text = q_sv.get("sv", "") if isinstance(q_sv, dict) else ""
-        q_en_text = q_sv.get("en", "") if isinstance(q_sv, dict) else ""
-        if not q_sv_text or not q_en_text:
-            continue
-
-        dok_id = bet_info.get("dok_id", "")
-        committee_code, cat_sv, cat_en = _get_category(bet)
-        punkt_type = _detect_punkt_type(pd.get("forslag", ""))
+        punkt = row.get("punkt", "")
+        ck = _resolve_punkt_key(punkt, all_bet_punkter) if punkt else None
+        pd = all_bet_punkter.get(ck, {}) if ck else {}
+        punkt_type = _detect_punkt_type(pd.get("forslag", "")) if pd.get("forslag") else "other"
         new_items.append({
             "id":            item_id,
             "datum":         datum,
             "rm":            rm,
             "beteckning":    bet,
             "titel":         titel,
-            "punkt":         punkt,
-            "rubrik":        pd.get("rubrik", f"Punkt {punkt}"),
+            "punkt":         punkt or "",
+            "rubrik":        pd.get("rubrik", f"Punkt {punkt}" if punkt else ""),
             "type":          punkt_type,
             "category_code": committee_code,
             "category_sv":   cat_sv,
             "category_en":   cat_en,
-            "question_sv":   q_sv_text,
-            "question_en":   q_en_text,
-            "outcome":       outcome,
-            "ja_total":      ja_total,
-            "nej_total":     nej_total,
-            "url":           f"https://data.riksdagen.se/dokument/{dok_id}" if dok_id else "",
-            "party_stances": party_stances,
+            "question_sv":   row["question_sv"],
+            "question_en":   row["question_en"],
+            "url":           f"https://data.riksdagen.se/dokument/{dok_id_out}" if dok_id_out else "",
+            "party_stances": row["party_stances"],
         })
     return new_items
 
 print(f"Running with {WORKERS} parallel workers\n")
 with ThreadPoolExecutor(max_workers=WORKERS) as executor:
-    futures = {executor.submit(process_bet, bet, pl): bet for (rm, bet), pl in by_bet.items()}
+    futures = {executor.submit(process_document, rm, bet): (rm, bet) for rm, bet in selected_docs}
     for future in as_completed(futures):
         new_items = future.result()
         with _save_lock:
@@ -491,9 +662,24 @@ with ThreadPoolExecutor(max_workers=WORKERS) as executor:
                     results.append(item)
                     existing_ids.add(item["id"])
                     _points_done += 1
-            print(f"  [{_points_done}/{N_PUNKTER}] saved {len(new_items)} from {futures[future]}", flush=True)
+            print(f"  [{_points_done} questions saved] +{len(new_items)} from {futures[future][1]}", flush=True)
             with open(OUTPUT, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=2)
+
+save_bet_cache(bet_cache)
+
+if _extraction_errors:
+    prev = []
+    if os.path.exists(ERRORS_LOG):
+        try:
+            with open(ERRORS_LOG, encoding="utf-8") as ef:
+                prev = json.load(ef)
+        except Exception:
+            prev = []
+    merged = prev + _extraction_errors
+    with open(ERRORS_LOG, "w", encoding="utf-8") as ef:
+        json.dump(merged, ef, ensure_ascii=False, indent=2)
+    print(f"\nLogged {len(_extraction_errors)} issue(s) to {ERRORS_LOG} (total entries: {len(merged)})", flush=True)
 
 total_cost_sek = (_total_in * PRICE_IN + _total_out * PRICE_OUT) * USD_TO_SEK
 print(f"\nDone. {len(results)} questions written to {OUTPUT}")
@@ -504,6 +690,13 @@ if empty:
     print(f"\nWARNING: {len(empty)} questions have empty question text:")
     for r in empty:
         print(f"  {r['id']}")
-    print(f"\nRe-run with --retry-empty to regenerate them.")
+    print(f"\nRe-run extract_questions.py to fill them.")
 else:
     print(f"All {len(results)} questions have question text.")
+
+print(f"\n{'─'*60}")
+print(f"  SAMPLE — first 10 Swedish questions")
+print(f"{'─'*60}")
+for i, r in enumerate(results[:10], 1):
+    print(f"  {i:>2}. [{r.get('beteckning','')}] {r.get('question_sv','')}")
+print(f"{'─'*60}")
