@@ -84,13 +84,13 @@ export default function Page() {
   }
 
   const handleReset = () => {
-    updateStore({ answers: {}, currentIndex: 0 })
-    setView('quiz')
+    updateStore({ seed: generateSeed(), sampledIds: [], answers: {}, currentIndex: 0 })
+    setView('landing')
     setSettingsOpen(false)
   }
 
   const handleFullReset = () => {
-    updateStore({ sampledIds: [], answers: {}, currentIndex: 0 })
+    updateStore({ seed: generateSeed(), sampledIds: [], answers: {}, currentIndex: 0 })
     setView('landing')
   }
 

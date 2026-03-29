@@ -52,6 +52,7 @@ const T = {
 
 export default function LandingPage({ store, totalQuestionCount, onStart, onResume, onSeeResults, onReset, onOpenSettings, lang }: Props) {
   const [count, setCount] = useState(store.questionCount)
+  const [customInput, setCustomInput] = useState('')
   const [confirmReset, setConfirmReset] = useState(false)
   const t = T[lang]
   const roundedTotal = Math.round(totalQuestionCount / 100) * 100
@@ -120,9 +121,9 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
           {COUNT_OPTIONS.map((n) => (
             <button
               key={n}
-              onClick={() => setCount(n)}
+              onClick={() => { setCount(n); setCustomInput('') }}
               className={`flex-1 py-4 text-lg font-bold border-2 transition-all active:scale-95 ${
-                count === n
+                count === n && customInput === ''
                   ? 'bg-navy text-cream border-navy'
                   : 'bg-transparent text-navy border-navy/20 hover:border-navy/60'
               }`}
@@ -135,14 +136,16 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
             min={1}
             max={500}
             placeholder={t.custom}
-            value={COUNT_OPTIONS.includes(count) ? '' : count}
+            value={customInput}
             onChange={(e) => {
-              const v = Math.min(500, Math.max(1, parseInt(e.target.value) || 1))
-              setCount(v)
+              const raw = e.target.value
+              setCustomInput(raw)
+              const v = parseInt(raw)
+              if (!isNaN(v) && v >= 1) setCount(Math.min(500, v))
             }}
             className={`w-20 py-4 text-lg font-bold border-2 text-center transition-all bg-transparent outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${
-              !COUNT_OPTIONS.includes(count)
-                ? 'bg-navy text-cream border-navy'
+              customInput !== ''
+                ? 'bg-navy text-cream border-navy placeholder:text-cream/40'
                 : 'text-navy border-navy/20 hover:border-navy/60'
             }`}
           />
