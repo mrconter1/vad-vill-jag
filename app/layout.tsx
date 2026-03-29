@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next'
 import { Syne, Outfit } from 'next/font/google'
+import { Analytics } from '@vercel/analytics/next'
 import './globals.css'
 
 const syne = Syne({
@@ -35,6 +36,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="sv" className={`${syne.variable} ${outfit.variable}`}>
       <body>{children}</body>
+      <Analytics />
     </html>
   )
 }
