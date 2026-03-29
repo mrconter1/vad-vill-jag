@@ -4,7 +4,7 @@ A Swedish political quiz that matches your views to real Riksdag votes. Question
 
 ## How it works
 
-1. A random set of questions is drawn from ~1700 real parliamentary votes from the last five years.
+1. A random set of questions is drawn from ~1800 real parliamentary votes from the last five years.
 2. You answer JA, NEJ, or Ingen åsikt for each.
 3. Your answers are compared to how each party actually voted, giving you a party alignment breakdown.
 
