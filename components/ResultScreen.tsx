@@ -16,20 +16,34 @@ const T = {
   sv: {
     done: 'Klart!',
     answered: (n: number) => `Du svarade på ${n} frågor`,
+    skip: 'Ingen åsikt',
     alignment: 'Partiöverensstämmelse',
-    mostAligned: (party: string) => `Du är mest ense med ${party}`,
+    mostAligned: (party: string) => `Mest ense med ${party}`,
     playAgain: 'Spela igen (samma frågor)',
     newRound: 'Ny omgång',
-    agreeLabel: 'av frågorna',
+    breakdown: 'Fråga för fråga',
+    yourAnswer: 'Du',
+    for: 'Ja',
+    against: 'Nej',
+    source: 'Källa',
+    agreed: 'höll med',
+    disagreed: 'höll inte med',
   },
   en: {
     done: 'Done!',
     answered: (n: number) => `You answered ${n} questions`,
+    skip: 'No opinion',
     alignment: 'Party alignment',
-    mostAligned: (party: string) => `You agree most with ${party}`,
+    mostAligned: (party: string) => `Most aligned with ${party}`,
     playAgain: 'Play again (same questions)',
     newRound: 'New round',
-    agreeLabel: 'of questions',
+    breakdown: 'Question by question',
+    yourAnswer: 'You',
+    for: 'Yes',
+    against: 'No',
+    source: 'Source',
+    agreed: 'agreed',
+    disagreed: 'disagreed',
   },
 }
 
@@ -53,7 +67,7 @@ export default function ResultScreen({
 
   questions.forEach((q) => {
     const userAnswer = answers[q.id]
-    if (!userAnswer) return
+    if (!userAnswer || userAnswer === 'skip') return
     PARTIES.forEach((party) => {
       const stance = q.party_stances[party]
       if (stance && stance !== 'abstain') {
@@ -70,8 +84,6 @@ export default function ResultScreen({
     pct: partyStats[party].total > 0
       ? Math.round((partyStats[party].agreed / partyStats[party].total) * 100)
       : 0,
-    agreed: partyStats[party].agreed,
-    total: partyStats[party].total,
   })).sort((a, b) => b.pct - a.pct)
 
   const top = alignments[0]
@@ -94,10 +106,10 @@ export default function ResultScreen({
       </div>
 
       {/* Title */}
-      <div className="pt-4 pb-6 animate-fadeUp">
+      <div className="pt-2 pb-6 animate-fadeUp">
         <h1
           className="font-black text-navy leading-none mb-2"
-          style={{ fontFamily: 'Syne, sans-serif', fontSize: '3.5rem' }}
+          style={{ fontFamily: 'var(--font-syne), sans-serif', fontSize: '3.5rem' }}
         >
           {t.done}
         </h1>
@@ -114,7 +126,7 @@ export default function ResultScreen({
             <span
               className="font-black leading-none"
               style={{
-                fontFamily: 'Syne, sans-serif',
+                fontFamily: 'var(--font-syne), sans-serif',
                 fontSize: '4rem',
                 color: PARTY_COLORS[top.party as Party],
               }}
@@ -131,13 +143,13 @@ export default function ResultScreen({
         </div>
       )}
 
-      {/* All party bars */}
-      <div className="mb-10 animate-fadeUp" style={{ animationDelay: '120ms' }}>
+      {/* Party alignment bars */}
+      <div className="mb-8 animate-fadeUp" style={{ animationDelay: '120ms' }}>
         <p className="text-[11px] uppercase tracking-[0.15em] text-navy/40 mb-4">
           {t.alignment}
         </p>
         <div className="space-y-3">
-          {alignments.map(({ party, pct, agreed, total }, i) => (
+          {alignments.map(({ party, pct }, i) => (
             <div key={party} className="flex items-center gap-3">
               <span
                 className="text-xs font-black w-7 shrink-0 text-right"
@@ -147,11 +159,10 @@ export default function ResultScreen({
               </span>
               <div className="flex-1 h-7 bg-navy/8 overflow-hidden">
                 <div
-                  className="h-7 flex items-center justify-end pr-2 transition-all"
+                  className="h-7 flex items-center justify-end pr-2"
                   style={{
                     width: maxPct > 0 ? `${(pct / maxPct) * 100}%` : '0%',
                     backgroundColor: PARTY_COLORS[party as Party] + (i === 0 ? 'dd' : '88'),
-                    animationDelay: `${120 + i * 50}ms`,
                   }}
                 >
                   {pct > 20 && (
@@ -167,12 +178,12 @@ export default function ResultScreen({
         </div>
       </div>
 
-      {/* Buttons */}
-      <div className="pb-10 flex flex-col gap-3 animate-fadeUp" style={{ animationDelay: '200ms' }}>
+      {/* Action buttons */}
+      <div className="flex flex-col gap-3 mb-12 animate-fadeUp" style={{ animationDelay: '180ms' }}>
         <button
           onClick={onNewRound}
           className="w-full py-5 bg-gold text-navy text-base font-bold tracking-wide hover:bg-amber-400 active:scale-95 transition-all"
-          style={{ fontFamily: 'Syne, sans-serif' }}
+          style={{ fontFamily: 'var(--font-syne), sans-serif' }}
         >
           {t.newRound} →
         </button>
@@ -182,6 +193,90 @@ export default function ResultScreen({
         >
           {t.playAgain}
         </button>
+      </div>
+
+      {/* Per-question breakdown */}
+      <div className="pb-16 animate-fadeUp" style={{ animationDelay: '220ms' }}>
+        <div className="h-px bg-navy/10 mb-8" />
+        <p className="text-[11px] uppercase tracking-[0.15em] text-navy/40 mb-6">
+          {t.breakdown}
+        </p>
+        <div className="space-y-6">
+          {questions.map((q, idx) => {
+            const userAnswer = answers[q.id]
+            if (!userAnswer) return null
+            if (userAnswer === 'skip') return (
+              <div key={q.id} className="border-l-2 border-navy/10 pl-4 opacity-50">
+                <p className="text-[11px] font-mono text-navy/30 mb-1">{idx + 1}. {q.beteckning}</p>
+                <p className="text-navy/60 text-sm leading-snug mb-1">{lang === 'sv' ? q.question_sv : q.question_en}</p>
+                <span className="text-[11px] text-navy/40 italic">{t.skip}</span>
+              </div>
+            )
+            const questionText = lang === 'sv' ? q.question_sv : q.question_en
+
+            const partyResults = PARTIES.map((p) => {
+              const stance = q.party_stances[p]
+              const agrees = userAnswer !== 'skip' && stance === userAnswer
+              const abstains = stance === 'abstain' || !stance
+              return { party: p, agrees, abstains }
+            })
+
+            const agreeParties = partyResults.filter((p) => !p.abstains && p.agrees).map((p) => p.party)
+            const disagreeParties = partyResults.filter((p) => !p.abstains && !p.agrees).map((p) => p.party)
+
+            return (
+              <div key={q.id} className="border-l-2 border-navy/10 pl-4">
+                <p className="text-[11px] font-mono text-navy/30 mb-1">
+                  {idx + 1}. {q.beteckning}
+                </p>
+                <p className="text-navy/80 text-sm leading-snug mb-3">{questionText}</p>
+
+                <div className="flex items-center gap-2 mb-2">
+                  <span
+                    className={`text-[11px] font-bold px-2 py-0.5 ${
+                      userAnswer === 'for'
+                        ? 'bg-green-700 text-white'
+                        : 'bg-red-700 text-white'
+                    }`}
+                  >
+                    {t.yourAnswer}: {userAnswer === 'for' ? t.for : t.against}
+                  </span>
+                </div>
+
+                <div className="flex gap-3 flex-wrap">
+                  {agreeParties.length > 0 && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] text-green-700 font-semibold">{t.agreed}:</span>
+                      {agreeParties.map((p) => (
+                        <span
+                          key={p}
+                          className="text-[10px] font-black"
+                          style={{ color: PARTY_COLORS[p as Party] }}
+                        >
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {disagreeParties.length > 0 && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-[10px] text-red-700/70 font-semibold">{t.disagreed}:</span>
+                      {disagreeParties.map((p) => (
+                        <span
+                          key={p}
+                          className="text-[10px] font-black opacity-50"
+                          style={{ color: PARTY_COLORS[p as Party] }}
+                        >
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
     </div>
   )

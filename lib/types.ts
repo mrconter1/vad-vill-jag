@@ -17,7 +17,7 @@ export interface Question {
 }
 
 export type Language = 'sv' | 'en'
-export type UserAnswer = 'for' | 'against'
+export type UserAnswer = 'for' | 'against' | 'skip'
 export type PartyStance = 'for' | 'against' | 'abstain'
 
 export const PARTIES = ['S', 'SD', 'M', 'V', 'C', 'KD', 'MP', 'L'] as const

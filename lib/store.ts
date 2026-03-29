@@ -15,7 +15,7 @@ export interface QuizStore {
 function defaultStore(): QuizStore {
   return {
     seed: generateSeed(),
-    questionCount: 20,
+    questionCount: 50,
     sampledIds: [],
     answers: {},
     currentIndex: 0,

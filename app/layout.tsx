@@ -17,8 +17,8 @@ const outfit = Outfit({
 })
 
 export const metadata: Metadata = {
-  title: 'Vad vill jag?',
-  description: 'Ta reda på vilket parti du egentligen håller med om – baserat på riktiga riksdagsröster.',
+  title: 'Vilket parti tillhör jag?',
+  description: 'Ta reda på vilket parti du egentligen håller med om, baserat på riktiga riksdagsröster.',
 }
 
 export const viewport: Viewport = {

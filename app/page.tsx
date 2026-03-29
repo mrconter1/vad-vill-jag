@@ -25,14 +25,7 @@ export default function Page() {
         setAllQuestions(data)
         const s = loadStore()
         setStore(s)
-        if (s.sampledIds.length > 0) {
-          const answeredCount = Object.keys(s.answers).length
-          if (answeredCount >= s.sampledIds.length) {
-            setView('results')
-          } else {
-            setView('quiz')
-          }
-        }
+        // Always start at landing — resume/results accessible via buttons
         setLoading(false)
       })
   }, [])
@@ -61,10 +54,22 @@ export default function Page() {
   const handleAnswer = (answer: UserAnswer) => {
     if (!store) return
     const questionId = store.sampledIds[store.currentIndex]
-    updateStore({ answers: { ...store.answers, [questionId]: answer } })
+    const newAnswers = { ...store.answers, [questionId]: answer }
+    const nextIndex = store.currentIndex + 1
+    if (nextIndex >= store.sampledIds.length) {
+      updateStore({ answers: newAnswers })
+      setView('results')
+    } else {
+      updateStore({ answers: newAnswers, currentIndex: nextIndex })
+    }
   }
 
-  const handleNext = () => {
+  const handlePrev = () => {
+    if (!store || store.currentIndex === 0) return
+    updateStore({ currentIndex: store.currentIndex - 1 })
+  }
+
+  const handleNextNav = () => {
     if (!store) return
     const nextIndex = store.currentIndex + 1
     if (nextIndex >= store.sampledIds.length) {
@@ -82,6 +87,11 @@ export default function Page() {
     updateStore({ answers: {}, currentIndex: 0 })
     setView('quiz')
     setSettingsOpen(false)
+  }
+
+  const handleFullReset = () => {
+    updateStore({ sampledIds: [], answers: {}, currentIndex: 0 })
+    setView('landing')
   }
 
   const handleNewRound = () => {
@@ -113,8 +123,11 @@ export default function Page() {
       {view === 'landing' && (
         <LandingPage
           store={store}
+          totalQuestionCount={allQuestions.length}
           onStart={handleStart}
-          onNewSeed={handleNewSeed}
+          onResume={() => setView('quiz')}
+          onSeeResults={() => setView('results')}
+          onReset={handleFullReset}
           onOpenSettings={() => setSettingsOpen(true)}
           lang={store.language}
         />
@@ -128,18 +141,21 @@ export default function Page() {
           totalQuestions={store.sampledIds.length}
           existingAnswer={store.answers[currentQuestion.id] ?? null}
           onAnswer={handleAnswer}
-          onNext={handleNext}
+          onPrev={store.currentIndex > 0 ? handlePrev : null}
+          onNextNav={store.currentIndex < store.sampledIds.length - 1 ? handleNextNav : (store.answers[currentQuestion.id] ? handleNextNav : null)}
           onOpenSettings={() => setSettingsOpen(true)}
           lang={store.language}
         />
       )}
 
       {view === 'quiz' && !currentQuestion && sampledQuestions.length === 0 && (
-        // Sampled IDs exist but questions not found (stale data) — go back to landing
         <LandingPage
           store={store}
+          totalQuestionCount={allQuestions.length}
           onStart={handleStart}
-          onNewSeed={handleNewSeed}
+          onResume={() => setView('quiz')}
+          onSeeResults={() => setView('results')}
+          onReset={handleFullReset}
           onOpenSettings={() => setSettingsOpen(true)}
           lang={store.language}
         />
