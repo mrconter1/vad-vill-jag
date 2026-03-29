@@ -19,6 +19,9 @@ const outfit = Outfit({
 export const metadata: Metadata = {
   title: 'Vilket parti tillhör jag?',
   description: 'Ta reda på vilket parti du egentligen håller med om, baserat på riktiga riksdagsröster.',
+  icons: {
+    icon: '/favicon.svg',
+  },
 }
 
 export const viewport: Viewport = {
