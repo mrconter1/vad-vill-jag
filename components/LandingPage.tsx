@@ -143,10 +143,11 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
               const v = parseInt(raw)
               if (!isNaN(v) && v >= 1) setCount(Math.min(500, v))
             }}
-            className={`w-20 py-4 text-lg font-bold border-2 text-center transition-all bg-transparent outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${
+            style={customInput !== '' ? { background: '#14213D', color: '#F7F3EC', borderColor: '#14213D' } : {}}
+            className={`w-20 py-4 text-lg font-bold border-2 text-center transition-all outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${
               customInput !== ''
-                ? 'bg-navy text-cream border-navy placeholder:text-cream/40'
-                : 'text-navy border-navy/20 hover:border-navy/60'
+                ? 'border-navy'
+                : 'bg-transparent text-navy border-navy/20 hover:border-navy/60'
             }`}
           />
         </div>
