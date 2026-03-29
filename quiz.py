@@ -19,7 +19,9 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 50
 def load_questions():
     with open("questions.json", encoding="utf-8") as f:
         all_q = json.load(f)
-    return [q for q in all_q if q.get("question_sv") and q.get("question_en") and q.get("party_stances")]
+    return [q for q in all_q if q.get("question_sv") not in (None, "", "N/A")
+            and q.get("question_en") not in (None, "", "N/A")
+            and q.get("party_stances")]
 
 def pick_language():
     print("Language / Språk:")

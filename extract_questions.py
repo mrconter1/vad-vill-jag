@@ -341,9 +341,15 @@ def extract_questions_for_bet(titel, punkter_data):
         "Use neutral, formal language — no slang, no colloquialisms (e.g. never use 'schyssta', 'kolla', 'fixa'). "
         "Avoid procedural jargon like 'motion', 'betänkande', 'utskott', 'yrkande'. "
         "No em dashes. One sentence per punkt. Phrased so the person can answer yes or no.\n\n"
-        "Reply ONLY with JSON where each key is the punkt number and the value has "
-        "'sv' (Swedish) and 'en' (English) fields.\n"
-        'Example: {"2": {"sv": "Ska arbetsgivare tvingas...", "en": "Should employers be required to..."}}'
+        "IMPORTANT: Some punkter are not suitable for a general public quiz. "
+        "Return null for a punkt if it is: a ratification of a specific past budget or emergency measure, "
+        "a one-time procedural vote (e.g. approving an audit report, ratifying a specific year's guidelines), "
+        "a COVID-specific temporary measure, or so vague that it has no concrete policy content "
+        "(e.g. 'do you agree with unspecified motions from the general debate'). "
+        "These should not be shown to quiz users.\n\n"
+        "Reply ONLY with JSON where each key is the punkt number and the value is either "
+        "an object with 'sv' and 'en' fields, or null if not suitable.\n"
+        'Example: {"2": {"sv": "Ska arbetsgivare tvingas...", "en": "Should employers be required to..."}, "3": null}'
     )
     msg = client.messages.create(model=MODEL, max_tokens=1024,
                                   messages=[{"role": "user", "content": prompt}])
@@ -441,6 +447,14 @@ def process_bet(bet, punkt_list):
             for party in PARTIES if party in tally
         }
 
+        q_sv = questions_map.get(punkt, {})
+        if q_sv is None:
+            continue  # Claude flagged as not suitable
+        q_sv_text = q_sv.get("sv", "") if isinstance(q_sv, dict) else ""
+        q_en_text = q_sv.get("en", "") if isinstance(q_sv, dict) else ""
+        if not q_sv_text or not q_en_text:
+            continue
+
         dok_id = bet_info.get("dok_id", "")
         committee_code, cat_sv, cat_en = _get_category(bet)
         punkt_type = _detect_punkt_type(pd.get("forslag", ""))
@@ -456,8 +470,8 @@ def process_bet(bet, punkt_list):
             "category_code": committee_code,
             "category_sv":   cat_sv,
             "category_en":   cat_en,
-            "question_sv":   questions_map.get(punkt, {}).get("sv", ""),
-            "question_en":   questions_map.get(punkt, {}).get("en", ""),
+            "question_sv":   q_sv_text,
+            "question_en":   q_en_text,
             "outcome":       outcome,
             "ja_total":      ja_total,
             "nej_total":     nej_total,
