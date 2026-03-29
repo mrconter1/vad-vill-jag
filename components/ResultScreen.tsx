@@ -216,7 +216,7 @@ export default function ResultScreen({
 
             const partyResults = PARTIES.map((p) => {
               const stance = q.party_stances[p]
-              const agrees = userAnswer !== 'skip' && stance === userAnswer
+              const agrees = stance === userAnswer
               const abstains = stance === 'abstain' || !stance
               return { party: p, agrees, abstains }
             })
