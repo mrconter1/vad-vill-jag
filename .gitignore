@@ -1,3 +1,19 @@
-*.json
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Data pipeline (large data files)
+data-pipeline/votering-*.json
+data-pipeline/bet-cache.json
+data-pipeline/extraction-errors.json
+data-pipeline/__pycache__/
+
+# Secrets
 .env
-__pycache__/*.pyc
+data-pipeline/.env
+
+# Misc
+*.pyc
