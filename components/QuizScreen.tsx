@@ -21,7 +21,7 @@ const T = {
     of: 'av',
     ja: 'JA',
     nej: 'NEJ',
-    skip: 'Ingen åsikt',
+    skipRows: ['Vet inte', 'Ingen åsikt'] as const,
     source: 'Källa',
   },
   en: {
@@ -119,14 +119,28 @@ export default function QuizScreen({
             {t.nej}
           </button>
           <button
+            type="button"
             onClick={() => onAnswer('skip')}
-            className={`${btnBase} text-xs font-semibold ${
+            aria-label={
+              lang === 'sv'
+                ? `${T.sv.skipRows[0]} / ${T.sv.skipRows[1]}`
+                : T.en.skip
+            }
+            className={`${btnBase} flex flex-col items-center justify-center gap-0 text-xs font-semibold leading-tight ${
               existingAnswer === 'skip'
                 ? 'border-navy bg-navy text-cream'
                 : 'border-navy/15 text-navy/40 hover:border-navy/40 hover:text-navy/60'
             }`}
           >
-            {t.skip}
+            {lang === 'sv' ? (
+              <>
+                <span>{T.sv.skipRows[0]}</span>
+                <span className="text-[10px] font-normal text-navy/35 leading-none py-0.5">/</span>
+                <span>{T.sv.skipRows[1]}</span>
+              </>
+            ) : (
+              T.en.skip
+            )}
           </button>
           <button
             onClick={() => onAnswer('for')}

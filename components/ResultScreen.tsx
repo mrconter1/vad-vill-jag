@@ -16,7 +16,7 @@ const T = {
   sv: {
     done: 'Klart!',
     answered: (n: number) => `Du svarade på ${n} frågor`,
-    skip: 'Ingen åsikt',
+    skipRows: ['Vet inte', 'Ingen åsikt'] as const,
     alignment: 'Partiöverensstämmelse',
     mostAligned: (party: string) => `Mest ense med ${party}`,
     playAgain: 'Spela igen (samma frågor)',
@@ -209,7 +209,17 @@ export default function ResultScreen({
               <div key={q.id} className="border-l-2 border-navy/10 pl-4 opacity-50">
                 <p className="text-[11px] font-mono text-navy/30 mb-1">{idx + 1}. {q.beteckning}</p>
                 <p className="text-navy/60 text-sm leading-snug mb-1">{lang === 'sv' ? q.question_sv : q.question_en}</p>
-                <span className="text-[11px] text-navy/40 italic">{t.skip}</span>
+                <span className="text-[11px] text-navy/40 italic flex flex-col items-start gap-0 leading-tight">
+                  {lang === 'sv' ? (
+                    <>
+                      <span>{T.sv.skipRows[0]}</span>
+                      <span className="text-navy/30 not-italic">/</span>
+                      <span>{T.sv.skipRows[1]}</span>
+                    </>
+                  ) : (
+                    t.skip
+                  )}
+                </span>
               </div>
             )
             const questionText = lang === 'sv' ? q.question_sv : q.question_en
