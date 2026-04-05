@@ -2,11 +2,13 @@
 
 import { useState } from 'react'
 import type { QuizStore } from '@/lib/store'
-import type { Language } from '@/lib/types'
+import type { Language, Question } from '@/lib/types'
 
 interface Props {
   store: QuizStore
-  totalQuestionCount: number
+  allQuestions: Question[]
+  selectedCategory: string | null
+  onSelectCategory: (category: string | null) => void
   onStart: (count: number) => void
   onResume: () => void
   onSeeResults: () => void
@@ -24,6 +26,8 @@ const T = {
     how: (n: number, total: number) => `När du startar slumpas ${n} frågor ut från ca ${total} frågeställningar som riksdagen röstat om de senaste fem åren. Dina svar jämförs sedan med hur partierna faktiskt röstade.`,
     fairTitle: 'Varför är det rättvist?',
     fair: 'Alla frågor är hämtade direkt ur riksdagens öppna data utan egna tolkningar. Urvalet är slumpmässigt och baseras enbart på verkliga voteringar.',
+    categoryLabel: 'Ämne',
+    allCategories: 'Alla ämnen',
     countLabel: 'Antal frågor',
     custom: 'Eget',
     start: 'Starta quiz',
@@ -39,6 +43,8 @@ const T = {
     how: (n: number, total: number) => `When you start, ${n} questions are randomly drawn from around ${total} issues the Riksdag has voted on in the last five years. Your answers are then compared to how parties actually voted.`,
     fairTitle: 'Why is it fair?',
     fair: 'All questions are sourced directly from Sweden\'s open parliamentary data with no editorial interpretation. The selection is random and based solely on real recorded votes.',
+    categoryLabel: 'Topic',
+    allCategories: 'All topics',
     countLabel: 'Number of questions',
     custom: 'Custom',
     start: 'Start quiz',
@@ -50,12 +56,22 @@ const T = {
   },
 }
 
-export default function LandingPage({ store, totalQuestionCount, onStart, onResume, onSeeResults, onReset, onOpenSettings, lang }: Props) {
+export default function LandingPage({ store, allQuestions, selectedCategory, onSelectCategory, onStart, onResume, onSeeResults, onReset, onOpenSettings, lang }: Props) {
   const [count, setCount] = useState(store.questionCount)
   const [customInput, setCustomInput] = useState('')
   const [confirmReset, setConfirmReset] = useState(false)
   const t = T[lang]
-  const roundedTotal = Math.round(totalQuestionCount / 100) * 100
+
+  const categories = [...new Map(
+    allQuestions.map((q) => [q.category_sv, { sv: q.category_sv, en: q.category_en }])
+  ).values()].sort((a, b) => a.sv.localeCompare(b.sv, 'sv'))
+
+  const poolSize = selectedCategory
+    ? allQuestions.filter((q) => q.category_sv === selectedCategory).length
+    : allQuestions.length
+
+  const effectiveCount = Math.min(count, poolSize)
+  const roundedTotal = Math.round(poolSize / 10) * 10
 
   const answeredCount = Object.keys(store.answers).length
   const hasOngoing = store.sampledIds.length > 0 && answeredCount > 0 && answeredCount < store.sampledIds.length
@@ -101,7 +117,7 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
       {/* Explanation */}
       <div className="mb-8 animate-fadeUp" style={{ animationDelay: '80ms' }}>
         <div className="border-l-2 border-gold pl-4 space-y-3">
-          <p className="text-navy/70 text-sm leading-relaxed">{t.how(count, roundedTotal)}</p>
+          <p className="text-navy/70 text-sm leading-relaxed">{t.how(effectiveCount, roundedTotal)}</p>
           <p className="text-navy/70 text-sm leading-relaxed">{t.fair}</p>
           <a
             href="https://github.com/mrconter1/vad-vill-jag"
@@ -114,34 +130,72 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
         </div>
       </div>
 
+      {/* Category picker */}
+      <div className="mb-8 animate-fadeUp" style={{ animationDelay: '120ms' }}>
+        <p className="text-[11px] uppercase tracking-[0.15em] text-navy/40 mb-3">{t.categoryLabel}</p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => onSelectCategory(null)}
+            className={`px-3 py-1.5 text-xs font-semibold border-2 transition-all active:scale-95 ${
+              selectedCategory === null
+                ? 'bg-navy text-cream border-navy'
+                : 'bg-transparent text-navy border-navy/20 hover:border-navy/60'
+            }`}
+          >
+            {t.allCategories}
+          </button>
+          {categories.map((cat) => {
+            const label = lang === 'sv' ? cat.sv : cat.en
+            const n = allQuestions.filter((q) => q.category_sv === cat.sv).length
+            const active = selectedCategory === cat.sv
+            return (
+              <button
+                key={cat.sv}
+                onClick={() => onSelectCategory(active ? null : cat.sv)}
+                className={`px-3 py-1.5 text-xs font-semibold border-2 transition-all active:scale-95 ${
+                  active
+                    ? 'bg-navy text-cream border-navy'
+                    : 'bg-transparent text-navy border-navy/20 hover:border-navy/60'
+                }`}
+              >
+                {label} <span className={active ? 'opacity-60' : 'opacity-40'}>{n}</span>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
       {/* Count picker */}
       <div className="mb-8 animate-fadeUp" style={{ animationDelay: '160ms' }}>
         <p className="text-[11px] uppercase tracking-[0.15em] text-navy/40 mb-3">{t.countLabel}</p>
         <div className="flex gap-2">
-          {COUNT_OPTIONS.map((n) => (
-            <button
-              key={n}
-              onClick={() => { setCount(n); setCustomInput('') }}
-              className={`flex-1 py-4 text-lg font-bold border-2 transition-all active:scale-95 ${
-                count === n && customInput === ''
-                  ? 'bg-navy text-cream border-navy'
-                  : 'bg-transparent text-navy border-navy/20 hover:border-navy/60'
-              }`}
-            >
-              {n}
-            </button>
-          ))}
+          {COUNT_OPTIONS.map((n) => {
+            const capped = Math.min(n, poolSize)
+            return (
+              <button
+                key={n}
+                onClick={() => { setCount(n); setCustomInput('') }}
+                className={`flex-1 py-4 text-lg font-bold border-2 transition-all active:scale-95 ${
+                  count === n && customInput === ''
+                    ? 'bg-navy text-cream border-navy'
+                    : 'bg-transparent text-navy border-navy/20 hover:border-navy/60'
+                }`}
+              >
+                {capped}
+              </button>
+            )
+          })}
           <input
             type="number"
             min={1}
-            max={500}
+            max={poolSize}
             placeholder={t.custom}
             value={customInput}
             onChange={(e) => {
               const raw = e.target.value
               setCustomInput(raw)
               const v = parseInt(raw)
-              if (!isNaN(v) && v >= 1) setCount(Math.min(500, v))
+              if (!isNaN(v) && v >= 1) setCount(Math.min(poolSize, v))
             }}
             style={customInput !== '' ? { background: '#14213D', color: '#F7F3EC', borderColor: '#14213D' } : {}}
             className={`w-20 py-4 text-lg font-bold border-2 text-center transition-all outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${
@@ -182,7 +236,7 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
               {t.seeResults} →
             </button>
             <button
-              onClick={() => onStart(count)}
+              onClick={() => onStart(effectiveCount)}
               className="w-full py-3 border border-navy/20 text-navy/60 text-sm hover:border-navy/40 hover:text-navy transition-all"
             >
               {t.start}
@@ -197,7 +251,7 @@ export default function LandingPage({ store, totalQuestionCount, onStart, onResu
           </>
         ) : (
           <button
-            onClick={() => onStart(count)}
+            onClick={() => onStart(effectiveCount)}
             className="w-full py-5 bg-gold text-navy text-lg font-bold tracking-wide hover:bg-amber-400 active:scale-95 transition-all"
             style={{ fontFamily: 'var(--font-syne), sans-serif' }}
           >

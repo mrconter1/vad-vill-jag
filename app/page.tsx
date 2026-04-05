@@ -17,6 +17,7 @@ export default function Page() {
   const [view, setView] = useState<View>('landing')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
 
   useEffect(() => {
     fetch('/questions.json')
@@ -41,7 +42,10 @@ export default function Page() {
 
   const handleStart = (count: number) => {
     if (!store || allQuestions.length === 0) return
-    const sampled = sampleQuestions(allQuestions, store.seed, count)
+    const pool = selectedCategory
+      ? allQuestions.filter((q) => q.category_sv === selectedCategory)
+      : allQuestions
+    const sampled = sampleQuestions(pool, store.seed, Math.min(count, pool.length))
     updateStore({
       questionCount: count,
       sampledIds: sampled.map((q) => q.id),
@@ -123,7 +127,9 @@ export default function Page() {
       {view === 'landing' && (
         <LandingPage
           store={store}
-          totalQuestionCount={allQuestions.length}
+          allQuestions={allQuestions}
+          selectedCategory={selectedCategory}
+          onSelectCategory={setSelectedCategory}
           onStart={handleStart}
           onResume={() => setView('quiz')}
           onSeeResults={() => setView('results')}
@@ -151,7 +157,9 @@ export default function Page() {
       {view === 'quiz' && !currentQuestion && sampledQuestions.length === 0 && (
         <LandingPage
           store={store}
-          totalQuestionCount={allQuestions.length}
+          allQuestions={allQuestions}
+          selectedCategory={selectedCategory}
+          onSelectCategory={setSelectedCategory}
           onStart={handleStart}
           onResume={() => setView('quiz')}
           onSeeResults={() => setView('results')}
