@@ -17,6 +17,7 @@ const T = {
     done: 'Klart!',
     answered: (n: number) => `Du svarade på ${n} frågor`,
     skipRows: ['Vet inte', 'Ingen åsikt'] as const,
+    skip: 'Vet inte / Ingen åsikt',
     alignment: 'Partiöverensstämmelse',
     mostAligned: (party: string) => `Mest ense med ${party}`,
     playAgain: 'Spela igen (samma frågor)',
